@@ -13,7 +13,6 @@ pub enum SpatialEntityKind {
 struct EntityEntry {
     center: (i32, i32),
     radius: i32,
-    keys: SmallVec<[(i32, i32); 9]>,
     kind: SpatialEntityKind,
 }
 
@@ -64,8 +63,6 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
         radius: i32,
         kind: SpatialEntityKind,
     ) {
-        let mut keys = SmallVec::new();
-
         for dx in -radius..=radius {
             for dy in -radius..=radius {
                 let x = tile_pos.0 + dx;
@@ -79,8 +76,6 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
                         SpatialEntityKind::Actor => self.actors.set(x, y, true),
                         SpatialEntityKind::Item => self.items.set(x, y, true),
                     }
-
-                    keys.push((x, y));
                 }
             }
         }
@@ -89,7 +84,6 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
             EntityEntry {
                 center: tile_pos,
                 radius,
-                keys,
                 kind,
             },
         );
@@ -98,26 +92,33 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
     /// エンティティを全セルから削除
     pub fn remove(&mut self, entity: Entity) {
         if let Some(entry) = self.entity_info.remove(&entity) {
-            for key in entry.keys {
-                if let Some(idx) = Self::get_index(key.0, key.1) {
-                    let list = &mut self.cells[idx];
-                    list.retain(|e: &mut Entity| *e != entity);
+            for dx in -entry.radius..=entry.radius {
+                for dy in -entry.radius..=entry.radius {
+                    let x = entry.center.0 + dx;
+                    let y = entry.center.1 + dy;
+                    
+                    if let Some(idx) = Self::get_index(x, y) {
+                        let list = &mut self.cells[idx];
+                        
+                        if let Some(pos) = list.iter().position(|&e| e == entity) {
+                            list.swap_remove(pos);
+                        }
 
-                    if list.is_empty() {
-                        self.presence.set(key.0, key.1, false);
-                    }
+                        if list.is_empty() {
+                            self.presence.set(x, y, false);
+                        }
 
-                    // 同一種別の他エンティティが存在するか確認し、ビットマップを更新
-                    let has_same_kind = list.iter().any(|&e| {
-                        self.entity_info
-                            .get(&e)
-                            .map_or(false, |info| info.kind == entry.kind)
-                    });
+                        let has_same_kind = list.iter().any(|&e| {
+                            self.entity_info
+                                .get(&e)
+                                .map_or(false, |info| info.kind == entry.kind)
+                        });
 
-                    if !has_same_kind {
-                        match entry.kind {
-                            SpatialEntityKind::Actor => self.actors.set(key.0, key.1, false),
-                            SpatialEntityKind::Item => self.items.set(key.0, key.1, false),
+                        if !has_same_kind {
+                            match entry.kind {
+                                SpatialEntityKind::Actor => self.actors.set(x, y, false),
+                                SpatialEntityKind::Item => self.items.set(x, y, false),
+                            }
                         }
                     }
                 }
@@ -178,24 +179,24 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
                 continue;
             }
 
+            let y_offset = (y as usize) * W;
             for x in min_x..=max_x {
                 // 指定した種別が含まれないタイルをスキップ
                 if !mask.get(x, y) {
                     continue;
                 }
 
-                if let Some(idx) = Self::get_index(x, y) {
-                    for &e in &self.cells[idx] {
-                        if e != exclude {
-                            // セル内に複数種類が混在する場合があるため、最終フィルタリング
-                            if kind.is_none()
-                                || self
-                                    .entity_info
-                                    .get(&e)
-                                    .map_or(false, |info| Some(info.kind) == kind)
-                            {
-                                callback(e);
-                            }
+                let idx = y_offset + (x as usize);
+                for &e in &self.cells[idx] {
+                    if e != exclude {
+                        // セル内に複数種類が混在する場合があるため、最終フィルタリング
+                        if kind.is_none()
+                            || self
+                                .entity_info
+                                .get(&e)
+                                .map_or(false, |info| Some(info.kind) == kind)
+                        {
+                            callback(e);
                         }
                     }
                 }
