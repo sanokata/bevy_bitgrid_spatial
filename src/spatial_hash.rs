@@ -1,5 +1,5 @@
-use bevy::prelude::*;
 use bevy::ecs::entity::EntityHashMap;
+use bevy::prelude::*;
 use lexaos_bitboard::BitBoard;
 use smallvec::SmallVec;
 
@@ -11,6 +11,8 @@ pub enum SpatialEntityKind {
 }
 
 struct EntityEntry {
+    center: (i32, i32),
+    radius: i32,
     keys: SmallVec<[(i32, i32); 9]>,
     kind: SpatialEntityKind,
 }
@@ -55,28 +57,42 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
     }
 
     /// 指定座標を中心に、半径 radius の範囲でエンティティを登録
-    pub fn insert(&mut self, entity: Entity, tile_pos: (i32, i32), radius: i32, kind: SpatialEntityKind) {
+    pub fn insert(
+        &mut self,
+        entity: Entity,
+        tile_pos: (i32, i32),
+        radius: i32,
+        kind: SpatialEntityKind,
+    ) {
         let mut keys = SmallVec::new();
 
         for dx in -radius..=radius {
             for dy in -radius..=radius {
                 let x = tile_pos.0 + dx;
                 let y = tile_pos.1 + dy;
-                
+
                 if let Some(idx) = Self::get_index(x, y) {
                     self.cells[idx].push(entity);
-                    
+
                     self.presence.set(x, y, true);
                     match kind {
                         SpatialEntityKind::Actor => self.actors.set(x, y, true),
                         SpatialEntityKind::Item => self.items.set(x, y, true),
                     }
-                    
+
                     keys.push((x, y));
                 }
             }
         }
-        self.entity_info.insert(entity, EntityEntry { keys, kind });
+        self.entity_info.insert(
+            entity,
+            EntityEntry {
+                center: tile_pos,
+                radius,
+                keys,
+                kind,
+            },
+        );
     }
 
     /// エンティティを全セルから削除
@@ -86,14 +102,16 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
                 if let Some(idx) = Self::get_index(key.0, key.1) {
                     let list = &mut self.cells[idx];
                     list.retain(|e: &mut Entity| *e != entity);
-                    
+
                     if list.is_empty() {
                         self.presence.set(key.0, key.1, false);
                     }
 
                     // 同一種別の他エンティティが存在するか確認し、ビットマップを更新
                     let has_same_kind = list.iter().any(|&e| {
-                        self.entity_info.get(&e).map_or(false, |info| info.kind == entry.kind)
+                        self.entity_info
+                            .get(&e)
+                            .map_or(false, |info| info.kind == entry.kind)
                     });
 
                     if !has_same_kind {
@@ -108,12 +126,16 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
     }
 
     /// エンティティの座標情報を更新
-    pub fn update(&mut self, entity: Entity, new_tile_pos: (i32, i32), radius: i32, kind: SpatialEntityKind) {
+    pub fn update(
+        &mut self,
+        entity: Entity,
+        new_tile_pos: (i32, i32),
+        radius: i32,
+        kind: SpatialEntityKind,
+    ) {
         if let Some(info) = self.entity_info.get(&entity) {
-            if let Some(&(first_x, first_y)) = info.keys.first() {
-                if first_x == new_tile_pos.0 - radius && first_y == new_tile_pos.1 - radius {
-                    return;
-                }
+            if info.center == new_tile_pos && info.radius == radius && info.kind == kind {
+                return;
             }
             self.remove(entity);
         }
@@ -166,7 +188,12 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
                     for &e in &self.cells[idx] {
                         if e != exclude {
                             // セル内に複数種類が混在する場合があるため、最終フィルタリング
-                            if kind.is_none() || self.entity_info.get(&e).map_or(false, |info| Some(info.kind) == kind) {
+                            if kind.is_none()
+                                || self
+                                    .entity_info
+                                    .get(&e)
+                                    .map_or(false, |info| Some(info.kind) == kind)
+                            {
                                 callback(e);
                             }
                         }
@@ -177,8 +204,13 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
     }
 
     /// 旧API互換用：全種別を対象に走査
-    pub fn query_radius_callback<F>(&self, center: (i32, i32), radius: i32, exclude: Entity, callback: F)
-    where
+    pub fn query_radius_callback<F>(
+        &self,
+        center: (i32, i32),
+        radius: i32,
+        exclude: Entity,
+        callback: F,
+    ) where
         F: FnMut(Entity),
     {
         self.query_filtered_radius_callback(center, radius, exclude, None, callback);
@@ -194,10 +226,10 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
     ) -> Vec<Entity> {
         let mut result = Vec::new();
         self.query_filtered_radius_callback(center, radius, exclude, Some(kind), |e| {
-            if !result.contains(&e) {
-                result.push(e);
-            }
+            result.push(e);
         });
+        result.sort_unstable();
+        result.dedup();
         result
     }
 
@@ -205,21 +237,17 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
     pub fn query_radius(&self, center: (i32, i32), radius: i32, exclude: Entity) -> Vec<Entity> {
         let mut result = Vec::new();
         self.query_radius_callback(center, radius, exclude, |e| {
-            if !result.contains(&e) {
-                result.push(e);
-            }
+            result.push(e);
         });
+        result.sort_unstable();
+        result.dedup();
         result
     }
 
     /// ビットマスクを指定して範囲内のエンティティを一括走査。
     /// 遮蔽判定済みの視界マスクや、複雑な形状のAOE範囲を用いた検索に最適。
-    pub fn query_by_mask_callback<F>(
-        &self,
-        mask: &BitBoard<W, H>,
-        exclude: Entity,
-        mut callback: F,
-    ) where
+    pub fn query_by_mask_callback<F>(&self, mask: &BitBoard<W, H>, exclude: Entity, mut callback: F)
+    where
         F: FnMut(Entity),
     {
         // iter_set_bits はビットが立っている座標のみを高速に（空隙を飛ばして）巡回する
@@ -248,7 +276,7 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
             SpatialEntityKind::Actor => &self.actors,
             SpatialEntityKind::Item => &self.items,
         };
-        
+
         // 検索マスクと対象種別ボードの論理積をとり、実際に検索が必要なタイルのみに絞り込む
         let filtered_mask = mask & kind_board;
         self.query_by_mask_callback(&filtered_mask, exclude, callback);
@@ -372,9 +400,13 @@ mod tests {
         let (e0, dummy) = (es[0], es[1]);
         let mut sh = SpatialHash::<256, 256>::default();
         sh.insert(e0, (0, 0), 1, SpatialEntityKind::Actor);
-        
+
         let hits = sh.query_radius((0, 0), 2, dummy);
-        assert_eq!(hits.len(), 1, "Duplicate entities returned in query_radius!");
+        assert_eq!(
+            hits.len(),
+            1,
+            "Duplicate entities returned in query_radius!"
+        );
         assert_eq!(hits[0], e0);
     }
 }
