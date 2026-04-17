@@ -212,6 +212,48 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
         result
     }
 
+    /// ビットマスクを指定して範囲内のエンティティを一括走査。
+    /// 遮蔽判定済みの視界マスクや、複雑な形状のAOE範囲を用いた検索に最適。
+    pub fn query_by_mask_callback<F>(
+        &self,
+        mask: &BitBoard<W, H>,
+        exclude: Entity,
+        mut callback: F,
+    ) where
+        F: FnMut(Entity),
+    {
+        // iter_set_bits はビットが立っている座標のみを高速に（空隙を飛ばして）巡回する
+        for (x, y) in mask.iter_set_bits() {
+            if let Some(idx) = Self::get_index(x, y) {
+                for &e in &self.cells[idx] {
+                    if e != exclude {
+                        callback(e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// 種別ビットボードと検索マスクの論理積をとり、該当するエンティティを走査。
+    pub fn query_kind_mask_callback<F>(
+        &self,
+        mask: &BitBoard<W, H>,
+        kind: SpatialEntityKind,
+        exclude: Entity,
+        callback: F,
+    ) where
+        F: FnMut(Entity),
+    {
+        let kind_board = match kind {
+            SpatialEntityKind::Actor => &self.actors,
+            SpatialEntityKind::Item => &self.items,
+        };
+        
+        // 検索マスクと対象種別ボードの論理積をとり、実際に検索が必要なタイルのみに絞り込む
+        let filtered_mask = mask & kind_board;
+        self.query_by_mask_callback(&filtered_mask, exclude, callback);
+    }
+
     /// 指定タイルに候補となるエンティティが存在するか
     pub fn any_in_tile(&self, tile_x: i32, tile_y: i32, exclude: Entity) -> bool {
         if !self.presence.get(tile_x, tile_y) {
