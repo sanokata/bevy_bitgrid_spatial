@@ -3,7 +3,7 @@ use bevy::ecs::entity::EntityHashMap;
 use lexaos_bitboard::BitBoard;
 use smallvec::SmallVec;
 
-/// 空間ハッシュで管理するエンティティの種類
+/// 空間ハッシュで管理するエンティティ種別
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpatialEntityKind {
     Actor,
@@ -16,26 +16,22 @@ struct EntityEntry {
 }
 
 /// タイル座標ベースのエンティティ位置を管理する空間ハッシュ
-///
-/// フラット配列と SmallVec、BitBoard を活用し、ヒープアロケーションと
-/// ハッシュ計算コストを極限まで削った高速版実装。
+/// フラット配列、SmallVec、BitBoard を活用した高速実装
 #[derive(Resource)]
 pub struct SpatialHash<const W: usize, const H: usize> {
-    /// 1次元フラット配列によるセル（y * W + x でアクセス）。
-    /// HashMap ではなく固定長配列を使うことでルックアップが O(1) キャッシュ効率最強になる。
-    /// さらに SmallVec[Entity; 4] により1マスに4体までならヒープ割り当てがゼロ。
+    /// セル管理（y * W + x でアクセス）。SmallVec により少数エンティティならヒープ確保なし
     cells: Box<[SmallVec<[Entity; 4]>]>,
-    /// エンティティの管理情報（所属セルと種類）。EntityHashMap でハッシュ計算ゼロ。
+    /// エンティティの管理情報（所属セルと種別）
     entity_info: EntityHashMap<EntityEntry>,
-    /// 高速な存在判定用のビットマップ
+    /// 存在判定用のビットマップ
     presence: BitBoard<W, H>,
-    pub items: BitBoard<W, H>,        // ドロップアイテム
-    pub actors: BitBoard<W, H>,       // エネミー・NPC・プレイヤー
+    /// 種別ごとの高速存在判定ビットマップ
+    pub items: BitBoard<W, H>,
+    pub actors: BitBoard<W, H>,
 }
 
 impl<const W: usize, const H: usize> Default for SpatialHash<W, H> {
     fn default() -> Self {
-        // 大規模な配列によるスタックオーバーフローを防ぐため、vec! で確保してから Box::new
         let cells = vec![SmallVec::new(); W * H].into_boxed_slice();
         Self {
             cells,
@@ -48,7 +44,7 @@ impl<const W: usize, const H: usize> Default for SpatialHash<W, H> {
 }
 
 impl<const W: usize, const H: usize> SpatialHash<W, H> {
-    /// 座標から安全にフラット配列のインデックスを取得する
+    /// 座標から配列インデックスを取得。範囲外は None
     #[inline(always)]
     fn get_index(x: i32, y: i32) -> Option<usize> {
         if x < 0 || y < 0 || x >= (W as i32) || y >= (H as i32) {
@@ -58,7 +54,7 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
         }
     }
 
-    /// 指定したタイル座標を中心に、タイル半径 `radius` でエンティティを登録する
+    /// 指定座標を中心に、半径 radius の範囲でエンティティを登録
     pub fn insert(&mut self, entity: Entity, tile_pos: (i32, i32), radius: i32, kind: SpatialEntityKind) {
         let mut keys = SmallVec::new();
 
@@ -70,7 +66,6 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
                 if let Some(idx) = Self::get_index(x, y) {
                     self.cells[idx].push(entity);
                     
-                    // ビットマップの更新
                     self.presence.set(x, y, true);
                     match kind {
                         SpatialEntityKind::Actor => self.actors.set(x, y, true),
@@ -84,7 +79,7 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
         self.entity_info.insert(entity, EntityEntry { keys, kind });
     }
 
-    /// エンティティをすべてのセルから削除する
+    /// エンティティを全セルから削除
     pub fn remove(&mut self, entity: Entity) {
         if let Some(entry) = self.entity_info.remove(&entity) {
             for key in entry.keys {
@@ -92,12 +87,11 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
                     let list = &mut self.cells[idx];
                     list.retain(|e: &mut Entity| *e != entity);
                     
-                    // 全体の存在ビットの更新
                     if list.is_empty() {
                         self.presence.set(key.0, key.1, false);
                     }
 
-                    // 種類別ビットマップの更新（その種類のエンティティが他にもいないかチェック）
+                    // 同一種別の他エンティティが存在するか確認し、ビットマップを更新
                     let has_same_kind = list.iter().any(|&e| {
                         self.entity_info.get(&e).map_or(false, |info| info.kind == entry.kind)
                     });
@@ -113,7 +107,7 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
         }
     }
 
-    /// エンティティの登録座標を新しいタイル座標 `new_tile_pos` に更新する
+    /// エンティティの座標情報を更新
     pub fn update(&mut self, entity: Entity, new_tile_pos: (i32, i32), radius: i32, kind: SpatialEntityKind) {
         if let Some(info) = self.entity_info.get(&entity) {
             if let Some(&(first_x, first_y)) = info.keys.first() {
@@ -126,7 +120,7 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
         self.insert(entity, new_tile_pos, radius, kind);
     }
 
-    /// `center` からチェビシェフ距離 `radius` 以内にあるエンティティを走査する
+    /// コールバックを用いた半径範囲内のエンティティ走査
     pub fn query_radius_callback<F>(&self, center: (i32, i32), radius: i32, exclude: Entity, mut callback: F)
     where
         F: FnMut(Entity),
@@ -141,14 +135,14 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
             let max_x = (center.0 + radius).min((W as i32) - 1);
             if min_x > max_x { continue; }
             
-            // 行ごとにループ。BitBoard の存在判定で早期スキップ（マスク演算による高速一括判定）
+            // 行ごとの一括判定による早期スキップ
             if !self.presence.any_in_row(y, min_x, max_x) {
-                continue; // マス目に一つもエンティティが存在しない場合は行ごと即座にスキップ
+                continue; 
             }
             
             for x in min_x..=max_x {
                 if !self.presence.get(x, y) {
-                    continue; // 存在しないマスは HashMap アクセスなしでスキップ（O(1) ビット読込）
+                    continue; 
                 }
 
                 if let Some(idx) = Self::get_index(x, y) {
@@ -162,7 +156,7 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
         }
     }
 
-    /// `center` からチェビシェフ距離 `radius` 以内にあるエンティティを返す
+    /// 半径範囲内のエンティティ一覧を返す
     pub fn query_radius(&self, center: (i32, i32), radius: i32, exclude: Entity) -> Vec<Entity> {
         let mut result = Vec::new();
         self.query_radius_callback(center, radius, exclude, |e| {
@@ -173,7 +167,7 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
         result
     }
 
-    /// 指定タイル座標に `exclude` 以外のエンティティが存在するか
+    /// 指定タイルに候補となるエンティティが存在するか
     pub fn any_in_tile(&self, tile_x: i32, tile_y: i32, exclude: Entity) -> bool {
         if !self.presence.get(tile_x, tile_y) {
             return false;
@@ -185,7 +179,7 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
         }
     }
 
-    /// 指定タイル座標にいずれかのエンティティが存在するか（スポーン配置チェック用）
+    /// 指定タイルが他エンティティに占有されているか判定
     pub fn is_tile_occupied(&self, tile_x: i32, tile_y: i32) -> bool {
         if tile_x < 0 || tile_y < 0 || tile_x >= (W as i32) || tile_y >= (H as i32) {
             return false;
@@ -193,7 +187,7 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
         self.presence.get(tile_x, tile_y)
     }
 
-    /// すべての登録を削除する
+    /// 全登録情報を削除
     pub fn clear(&mut self) {
         for list in self.cells.iter_mut() {
             list.clear();

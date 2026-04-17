@@ -2,14 +2,14 @@ use bevy::prelude::*;
 pub mod spatial_hash;
 use spatial_hash::SpatialHash;
 
-/// 空間ハッシュで管理されるエンティティに付与するコンポーネント
+/// 空間ハッシュで管理されるエンティティへの付与コンポーネント
 #[derive(Component, Debug, Clone)]
 pub struct SpatialManaged {
     pub kind: spatial_hash::SpatialEntityKind,
     pub radius: i32,
 }
 
-/// 空間ハッシュを管理・同期するプラグイン
+/// 空間ハッシュの同期と管理を行うプラグイン
 pub struct SpatialGridPlugin<const W: usize, const H: usize>;
 
 impl<const W: usize, const H: usize> Plugin for SpatialGridPlugin<W, H> {
@@ -21,19 +21,18 @@ impl<const W: usize, const H: usize> Plugin for SpatialGridPlugin<W, H> {
     }
 }
 
-/// Transform を監視し、SpatialManaged コンポーネントを持つエンティティを空間ハッシュと同期する。
-/// スポーン時の初回登録も Changed<Transform> または Added<SpatialManaged> で検知される。
+/// Transform の変化を監視し、空間ハッシュの内容を同期
 fn sync_spatial_hash_system<const W: usize, const H: usize>(
     mut spatial_hash: ResMut<SpatialHash<W, H>>,
     query: Query<(Entity, &Transform, &SpatialManaged), Or<(Changed<Transform>, Added<SpatialManaged>)>>,
     mut removed: RemovedComponents<SpatialManaged>,
 ) {
-    // 削除されたエンティティのクリーンアップ
+    // 削除されたエンティティの除去
     for entity in removed.read() {
         spatial_hash.remove(entity);
     }
 
-    // 移動または追加されたエンティティの更新
+    // 移動または追加されたエンティティの座標更新
     for (entity, transform, managed) in query.iter() {
         let pos = transform.translation;
         let tile_x = pos.x.floor() as i32;
