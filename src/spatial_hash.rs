@@ -120,40 +120,85 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
         self.insert(entity, new_tile_pos, radius, kind);
     }
 
-    /// コールバックを用いた半径範囲内のエンティティ走査
-    pub fn query_radius_callback<F>(&self, center: (i32, i32), radius: i32, exclude: Entity, mut callback: F)
-    where
+    /// コールバックを用いた半径範囲内のエンティティ走査。
+    /// kind を指定すると、ビットマスクにより高速なフィルタリングが行われます。
+    pub fn query_filtered_radius_callback<F>(
+        &self,
+        center: (i32, i32),
+        radius: i32,
+        exclude: Entity,
+        kind: Option<SpatialEntityKind>,
+        mut callback: F,
+    ) where
         F: FnMut(Entity),
     {
+        // フィルタ用のビットボードを選択
+        let mask = match kind {
+            Some(SpatialEntityKind::Actor) => &self.actors,
+            Some(SpatialEntityKind::Item) => &self.items,
+            None => &self.presence,
+        };
+
         for dy in -radius..=radius {
             let y = center.1 + dy;
             if y < 0 || y >= (H as i32) {
                 continue;
             }
-            
+
             let min_x = (center.0 - radius).max(0);
             let max_x = (center.0 + radius).min((W as i32) - 1);
-            if min_x > max_x { continue; }
-            
-            // 行ごとの一括判定による早期スキップ
-            if !self.presence.any_in_row(y, min_x, max_x) {
-                continue; 
+            if min_x > max_x {
+                continue;
             }
-            
+
+            // 指定した種別が含まれない行を一括でスキップ
+            if !mask.any_in_row(y, min_x, max_x) {
+                continue;
+            }
+
             for x in min_x..=max_x {
-                if !self.presence.get(x, y) {
-                    continue; 
+                // 指定した種別が含まれないタイルをスキップ
+                if !mask.get(x, y) {
+                    continue;
                 }
 
                 if let Some(idx) = Self::get_index(x, y) {
                     for &e in &self.cells[idx] {
                         if e != exclude {
-                            callback(e);
+                            // セル内に複数種類が混在する場合があるため、最終フィルタリング
+                            if kind.is_none() || self.entity_info.get(&e).map_or(false, |info| Some(info.kind) == kind) {
+                                callback(e);
+                            }
                         }
                     }
                 }
             }
         }
+    }
+
+    /// 旧API互換用：全種別を対象に走査
+    pub fn query_radius_callback<F>(&self, center: (i32, i32), radius: i32, exclude: Entity, callback: F)
+    where
+        F: FnMut(Entity),
+    {
+        self.query_filtered_radius_callback(center, radius, exclude, None, callback);
+    }
+
+    /// 種別を指定して半径範囲内のエンティティ一覧を返す
+    pub fn query_kind_radius(
+        &self,
+        center: (i32, i32),
+        radius: i32,
+        exclude: Entity,
+        kind: SpatialEntityKind,
+    ) -> Vec<Entity> {
+        let mut result = Vec::new();
+        self.query_filtered_radius_callback(center, radius, exclude, Some(kind), |e| {
+            if !result.contains(&e) {
+                result.push(e);
+            }
+        });
+        result
     }
 
     /// 半径範囲内のエンティティ一覧を返す
