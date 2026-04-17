@@ -273,6 +273,7 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
     ) where
         F: FnMut(Entity),
     {
+        let start = std::time::Instant::now();
         let kind_board = match kind {
             SpatialEntityKind::Actor => &self.actors,
             SpatialEntityKind::Item => &self.items,
@@ -281,6 +282,11 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
         // 検索マスクと対象種別ボードの論理積をとり、実際に検索が必要なタイルのみに絞り込む
         let filtered_mask = mask & kind_board;
         self.query_by_mask_callback(&filtered_mask, exclude, callback);
+
+        let elapsed = start.elapsed();
+        if elapsed.as_micros() > 200 {
+            info!("Performance: SpatialHash query_kind_mask: {:?} (kind: {:?})", elapsed, kind);
+        }
     }
 
     /// 指定タイルに候補となるエンティティが存在するか
