@@ -251,7 +251,7 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
     where
         F: FnMut(Entity),
     {
-        // iter_set_bits はビットが立っている座標のみを高速に（空隙を飛ばして）巡回する
+        // iter_set_bits は内部で L1 階層マスクを利用して空隙を高速にスキップする
         for (x, y) in mask.iter_set_bits() {
             if let Some(idx) = Self::get_index(x, y) {
                 for &e in &self.cells[idx] {
@@ -263,13 +263,14 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
         }
     }
 
-    /// 種別ビットボードと検索マスクの論理積をとり、該当するエンティティを走査。
+    /// 種別ビットボードと検索マスクの条件に合うエンティティを走査。
+    /// 一時的な BitBoard 生成（論理積）を避け、イテレータ内で直接チェックすることで高速化。
     pub fn query_kind_mask_callback<F>(
         &self,
         mask: &BitBoard<W, H>,
         kind: SpatialEntityKind,
         exclude: Entity,
-        callback: F,
+        mut callback: F,
     ) where
         F: FnMut(Entity),
     {
@@ -279,9 +280,16 @@ impl<const W: usize, const H: usize> SpatialHash<W, H> {
             SpatialEntityKind::Item => &self.items,
         };
 
-        // 検索マスクと対象種別ボードの論理積をとり、実際に検索が必要なタイルのみに絞り込む
-        let filtered_mask = mask & kind_board;
-        self.query_by_mask_callback(&filtered_mask, exclude, callback);
+        // 階層的論理積走査（Hierarchical Intersection Scan）を利用して高速化
+        mask.for_each_intersection(kind_board, |x, y| {
+            if let Some(idx) = Self::get_index(x, y) {
+                for &e in &self.cells[idx] {
+                    if e != exclude {
+                        callback(e);
+                    }
+                }
+            }
+        });
 
         let elapsed = start.elapsed();
         if elapsed.as_micros() > 200 {
