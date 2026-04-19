@@ -298,6 +298,29 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         });
     }
 
+    /// 範囲制限付きのマクスクエリ
+    pub fn query_kind_mask_bounded_callback<F>(
+        &self,
+        mask: &BitBoard<W, H>,
+        kind_idx: usize,
+        exclude: Entity,
+        min_tile: (i32, i32),
+        max_tile: (i32, i32),
+        mut callback: F,
+    ) where
+        F: FnMut(Entity),
+    {
+        let kind_board = self.layer(kind_idx);
+
+        mask.for_each_intersection_in_range(kind_board, min_tile, max_tile, |_x, _y, idx| {
+            for &e in &self.cells[idx] {
+                if e != exclude {
+                    callback(e);
+                }
+            }
+        });
+    }
+
     pub fn is_tile_occupied(&self, tile_x: i32, tile_y: i32) -> bool {
         if tile_x < 0 || tile_y < 0 || tile_x >= (W as i32) || tile_y >= (H as i32) {
             return false;
