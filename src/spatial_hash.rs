@@ -15,9 +15,9 @@ struct EntityEntry {
 /// const S: 静的レイヤーの数 (Static layers like Terrain)
 #[derive(Resource)]
 pub struct SpatialHash<const W: usize, const H: usize, const E: usize, const S: usize> {
-    /// セル管理（y * W + x でアクセス）
-    cells: Box<[SmallVec<[Entity; 4]>]>,
-    /// エンティティの管理情報
+    /// セル管理（y * W + x でアクセス）。(Entity, KindIdx) のペアで保持し、クエリ時のハッシュマップ参照を排除。
+    cells: Box<[SmallVec<[(Entity, u8); 4]>]>,
+    /// エンティティの管理情報（履歴保持・削除用）
     entity_info: EntityHashMap<EntityEntry>,
     /// 存在判定用のビットマップ
     presence: BitBoard<W, H>,
@@ -102,7 +102,6 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
                 return;
             }
             if info.radius != new_radius || info.kind_idx != new_kind_idx {
-                let kind = info.kind_idx; // 固定用の取得
                 self.remove(entity);
                 self.insert(entity, new_center, new_radius, new_kind_idx);
                 return;
@@ -122,6 +121,7 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         let new_min = (new_center.0 - radius, new_center.1 - radius);
         let new_max = (new_center.0 + radius, new_center.1 + radius);
 
+        // 離れたセルから除去
         for x in old_min.0..=old_max.0 {
             for y in old_min.1..=old_max.1 {
                 if x < new_min.0 || x > new_max.0 || y < new_min.1 || y > new_max.1 {
@@ -130,6 +130,7 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
             }
         }
 
+        // 新しいセルへ挿入
         for x in new_min.0..=new_max.0 {
             for y in new_min.1..=new_max.1 {
                 if x < old_min.0 || x > old_max.0 || y < old_min.1 || y > old_max.1 {
@@ -145,7 +146,7 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
 
     fn cell_insert(&mut self, x: i32, y: i32, entity: Entity, kind_idx: usize) {
         if let Some(idx) = BitBoard::<W, H>::tile_to_index(x, y) {
-            self.cells[idx].push(entity);
+            self.cells[idx].push((entity, kind_idx as u8));
             self.presence.set(x, y, true);
             self.layer_mut(kind_idx).set(x, y, true);
         }
@@ -154,17 +155,15 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
     fn cell_remove(&mut self, x: i32, y: i32, entity: Entity, kind_idx: usize) {
         if let Some(idx) = BitBoard::<W, H>::tile_to_index(x, y) {
             let list = &mut self.cells[idx];
-            if let Some(pos) = list.iter().position(|&e| e == entity) {
+            if let Some(pos) = list.iter().position(|&(e, _)| e == entity) {
                 list.swap_remove(pos);
             }
             if list.is_empty() {
                 self.presence.set(x, y, false);
             }
-            let has_same_kind = list.iter().any(|&e| {
-                self.entity_info
-                    .get(&e)
-                    .map_or(false, |info| info.kind_idx == kind_idx)
-            });
+            
+            // info を引かずにリスト内の種別情報だけで BitBoard 更新判定が可能
+            let has_same_kind = list.iter().any(|&(_, k)| k == kind_idx as u8);
             if !has_same_kind {
                 self.layer_mut(kind_idx).set(x, y, false);
             }
@@ -238,6 +237,8 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
             None => &self.presence,
         };
 
+        let kind_u8 = kind_idx.map(|k| k as u8);
+
         for dy in -radius..=radius {
             let y = center.1 + dy;
             if y < 0 || y >= (H as i32) {
@@ -262,14 +263,10 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
                 }
 
                 let idx = row_base_idx + (x as usize);
-                for &e in &self.cells[idx] {
+                for &(e, k) in &self.cells[idx] {
                     if e != exclude {
-                        if kind_idx.is_none()
-                            || self
-                                .entity_info
-                                .get(&e)
-                                .map_or(false, |info| Some(info.kind_idx) == kind_idx)
-                        {
+                        // ハッシュマップを引かずに種別判定が可能
+                        if kind_u8.map_or(true, |target_k| k == target_k) {
                             callback(e);
                         }
                     }
@@ -288,10 +285,11 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         F: FnMut(Entity),
     {
         let kind_board = self.layer(kind_idx);
+        let kind_u8 = kind_idx as u8;
 
         mask.for_each_intersection(kind_board, |_x, _y, idx| {
-            for &e in &self.cells[idx] {
-                if e != exclude {
+            for &(e, k) in &self.cells[idx] {
+                if e != exclude && k == kind_u8 {
                     callback(e);
                 }
             }
@@ -311,10 +309,11 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         F: FnMut(Entity),
     {
         let kind_board = self.layer(kind_idx);
+        let kind_u8 = kind_idx as u8;
 
         mask.for_each_intersection_in_range(kind_board, min_tile, max_tile, |_x, _y, idx| {
-            for &e in &self.cells[idx] {
-                if e != exclude {
+            for &(e, k) in &self.cells[idx] {
+                if e != exclude && k == kind_u8 {
                     callback(e);
                 }
             }
