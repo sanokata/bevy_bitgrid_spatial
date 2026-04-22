@@ -327,3 +327,71 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         self.presence.get(tile_x, tile_y)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type TestSpatialHash = SpatialHash<256, 256, 2, 5>;
+
+    #[test]
+    fn test_spatial_insert_remove() {
+        let mut hash = TestSpatialHash::default();
+        let entity = Entity::from_raw(1);
+        
+        hash.insert(entity, (10, 10), 1, 0);
+        assert!(hash.is_tile_occupied(10, 10));
+        assert!(hash.is_tile_occupied(9, 9));
+        assert!(hash.is_tile_occupied(11, 11));
+        assert!(!hash.is_tile_occupied(12, 12));
+        
+        hash.remove(entity);
+        assert!(!hash.is_tile_occupied(10, 10));
+    }
+
+    #[test]
+    fn test_spatial_query_radius() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = Entity::from_raw(1);
+        let e2 = Entity::from_raw(2);
+        
+        hash.insert(e1, (10, 10), 0, 0); // At (10, 10)
+        hash.insert(e2, (15, 10), 0, 0); // At (15, 10)
+        
+        let mut found = Vec::new();
+        hash.query_filtered_radius_callback((10, 10), 5, Entity::from_raw(99), None, |e| {
+            found.push(e);
+        });
+        
+        assert_eq!(found.len(), 2);
+        assert!(found.contains(&e1));
+        assert!(found.contains(&e2)); // Exact distance 5 should be included
+        
+        let mut found2 = Vec::new();
+        hash.query_filtered_radius_callback((10, 10), 4, Entity::from_raw(99), None, |e| {
+            found2.push(e);
+        });
+        assert_eq!(found2.len(), 1);
+        assert!(found2.contains(&e1));
+    }
+
+    #[test]
+    fn test_spatial_boundary_conditions() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = Entity::from_raw(1);
+        
+        // At the zero boundary
+        hash.insert(e1, (0, 0), 1, 0); // Covers (-1,-1) to (1,1). Outside should be ignored by BitBoard logic.
+        assert!(hash.is_tile_occupied(0, 0));
+        assert!(hash.is_tile_occupied(1, 1));
+        assert!(!hash.is_tile_occupied(2, 2));
+        
+        hash.remove(e1);
+        
+        // At the max boundary (255, 255)
+        hash.insert(e1, (255, 255), 1, 0);
+        assert!(hash.is_tile_occupied(255, 255));
+        assert!(hash.is_tile_occupied(254, 254));
+        assert!(!hash.is_tile_occupied(253, 253));
+    }
+}
