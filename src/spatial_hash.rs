@@ -171,11 +171,27 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
     }
 
     pub fn insert(&mut self, entity: Entity, tile_pos: (i32, i32), radius: i32, kind_idx: usize) {
-        for dx in -radius..=radius {
-            for dy in -radius..=radius {
-                self.cell_insert(tile_pos.0 + dx, tile_pos.1 + dy, entity, kind_idx);
+        // 1. 中心点から dilate を用いて一括でマスクを生成 (O(log radius))
+        let mut mask = BitBoard::<W, H>::default();
+        mask.set(tile_pos.0, tile_pos.1, true);
+        let mask = if radius > 0 {
+            mask.dilate(radius as u32)
+        } else {
+            mask
+        };
+
+        // 2. BitBoard の一括 OR 更新 (SIMD最適化の恩恵)
+        self.presence |= &mask;
+        *self.layer_mut(kind_idx) |= &mask;
+
+        // 3. セル情報への登録 (iter_set_bits により、セットされたビットのみを効率的に走査)
+        for (x, y) in mask.iter_set_bits() {
+            if let Some(idx) = BitBoard::<W, H>::tile_to_index(x, y) {
+                self.cells[idx].push((entity, kind_idx as u8));
             }
         }
+
+        // 4. 管理情報の保存
         self.entity_info.insert(
             entity,
             EntityEntry {
@@ -211,7 +227,7 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         self.update_diff(entity, new_tile_pos, radius, kind_idx);
     }
 
-    pub fn compute_visibility_mask(
+    pub fn mask_visibility(
         &self,
         cx: i32,
         cy: i32,
@@ -219,9 +235,75 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         opaque_layer_idx: usize,
     ) -> BitBoard<W, H> {
         let opaque_board = self.static_layer(opaque_layer_idx);
-        opaque_board.compute_visibility_mask(cx, cy, radius, opaque_board)
+        opaque_board.mask_visibility(cx, cy, radius, opaque_board)
     }
 
+    /// 円形範囲内のエンティティを検索 (正確な半径判定)
+    pub fn query_circle_callback<F>(
+        &self,
+        center: (i32, i32),
+        radius: f32,
+        kind_idx: Option<usize>,
+        exclude: Entity,
+        mut callback: F,
+    ) where
+        F: FnMut(Entity),
+    {
+        // 1. 円形マスクの作成
+        let circle_mask = BitBoard::<W, H>::mask_sector(center.0, center.1, radius, 0.0, 360.0);
+        
+        // 2. 対象となるレイヤーボードを選択
+        let target_board = match kind_idx {
+            Some(k) => self.layer(k),
+            None => &self.presence,
+        };
+        let kind_u8 = kind_idx.map(|k| k as u8);
+
+        // 3. マスクとの積集合を高速走査
+        circle_mask.for_each_overlap(target_board, |_x, _y, idx| {
+            for &(e, k) in &self.cells[idx] {
+                if e != exclude {
+                    if kind_u8.map_or(true, |target_k| k == target_k) {
+                        callback(e);
+                    }
+                }
+            }
+        });
+    }
+
+    /// 扇形範囲内のエンティティを検索 (視界コーン等に使用)
+    pub fn query_sector_callback<F>(
+        &self,
+        center: (i32, i32),
+        radius: f32,
+        start_angle_deg: f32,
+        sweep_angle_deg: f32,
+        kind_idx: Option<usize>,
+        exclude: Entity,
+        mut callback: F,
+    ) where
+        F: FnMut(Entity),
+    {
+        let sector_mask = BitBoard::<W, H>::mask_sector(center.0, center.1, radius, start_angle_deg, sweep_angle_deg);
+        
+        let target_board = match kind_idx {
+            Some(k) => self.layer(k),
+            None => &self.presence,
+        };
+        let kind_u8 = kind_idx.map(|k| k as u8);
+
+        sector_mask.for_each_overlap(target_board, |_x, _y, idx| {
+            for &(e, k) in &self.cells[idx] {
+                if e != exclude {
+                    if kind_u8.map_or(true, |target_k| k == target_k) {
+                        callback(e);
+                    }
+                }
+            }
+        });
+    }
+
+    /// 矩形（正方形）範囲内のエンティティを検索 (レガシー/互換用)
     pub fn query_filtered_radius_callback<F>(
         &self,
         center: (i32, i32),
@@ -232,75 +314,58 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
     ) where
         F: FnMut(Entity),
     {
-        let mask = match kind_idx {
+        let target_board = match kind_idx {
             Some(k) => self.layer(k),
             None => &self.presence,
         };
-
         let kind_u8 = kind_idx.map(|k| k as u8);
 
-        for dy in -radius..=radius {
-            let y = center.1 + dy;
-            if y < 0 || y >= (H as i32) {
-                continue;
-            }
+        let min_tile = (center.0 - radius, center.1 - radius);
+        let max_tile = (center.0 + radius, center.1 + radius);
 
-            let min_x = (center.0 - radius).max(0);
-            let max_x = (center.0 + radius).min((W as i32) - 1);
-            if min_x > max_x {
-                continue;
-            }
-
-            if !mask.any_in_row(y, min_x, max_x) {
-                continue;
-            }
-
-            let row_base_idx = (y as usize) * W;
-
-            for x in min_x..=max_x {
-                if !mask.get(x, y) {
-                    continue;
-                }
-
-                let idx = row_base_idx + (x as usize);
-                for &(e, k) in &self.cells[idx] {
-                    if e != exclude {
-                        // ハッシュマップを引かずに種別判定が可能
-                        if kind_u8.map_or(true, |target_k| k == target_k) {
-                            callback(e);
-                        }
+        // BitBoard::for_each_overlap_in を活用
+        // 自分自身との積集合を指定範囲で取ることで、指定範囲のセットビットを走査
+        target_board.for_each_overlap_in(target_board, min_tile, max_tile, |_x, _y, idx| {
+            for &(e, k) in &self.cells[idx] {
+                if e != exclude {
+                    if kind_u8.map_or(true, |target_k| k == target_k) {
+                        callback(e);
                     }
                 }
             }
-        }
+        });
     }
 
-    pub fn query_kind_mask_callback<F>(
+    /// 任意のマスクと種別（任意）でエンティティを検索
+    pub fn query_mask_callback<F>(
         &self,
         mask: &BitBoard<W, H>,
-        kind_idx: usize,
+        kind_idx: Option<usize>,
         exclude: Entity,
         mut callback: F,
     ) where
         F: FnMut(Entity),
     {
-        let kind_board = self.layer(kind_idx);
-        let kind_u8 = kind_idx as u8;
+        let target_board = match kind_idx {
+            Some(k) => self.layer(k),
+            None => &self.presence,
+        };
+        let kind_u8 = kind_idx.map(|k| k as u8);
 
-        mask.for_each_intersection(kind_board, |_x, _y, idx| {
+        mask.for_each_overlap(target_board, |_x, _y, idx| {
             for &(e, k) in &self.cells[idx] {
-                if e != exclude && k == kind_u8 {
+                if e != exclude && kind_u8.map_or(true, |tk| k == tk) {
                     callback(e);
                 }
             }
         });
     }
 
-    /// 範囲制限付きのマクスクエリ
-    pub fn query_kind_mask_bounded_callback<F>(
+    /// 任意のマスク、種別（任意）、および範囲制限でエンティティを検索
+    pub fn query_mask_bounded_callback<F>(
         &self,
         mask: &BitBoard<W, H>,
-        kind_idx: usize,
+        kind_idx: Option<usize>,
         exclude: Entity,
         min_tile: (i32, i32),
         max_tile: (i32, i32),
@@ -308,12 +373,15 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
     ) where
         F: FnMut(Entity),
     {
-        let kind_board = self.layer(kind_idx);
-        let kind_u8 = kind_idx as u8;
+        let target_board = match kind_idx {
+            Some(k) => self.layer(k),
+            None => &self.presence,
+        };
+        let kind_u8 = kind_idx.map(|k| k as u8);
 
-        mask.for_each_intersection_in_range(kind_board, min_tile, max_tile, |_x, _y, idx| {
+        mask.for_each_overlap_in(target_board, min_tile, max_tile, |_x, _y, idx| {
             for &(e, k) in &self.cells[idx] {
-                if e != exclude && k == kind_u8 {
+                if e != exclude && kind_u8.map_or(true, |tk| k == tk) {
                     callback(e);
                 }
             }
@@ -337,7 +405,7 @@ mod tests {
     #[test]
     fn test_spatial_insert_remove() {
         let mut hash = TestSpatialHash::default();
-        let entity = Entity::from_raw(1);
+        let entity = Entity::from_bits(1);
         
         hash.insert(entity, (10, 10), 1, 0);
         assert!(hash.is_tile_occupied(10, 10));
@@ -352,14 +420,14 @@ mod tests {
     #[test]
     fn test_spatial_query_radius() {
         let mut hash = TestSpatialHash::default();
-        let e1 = Entity::from_raw(1);
-        let e2 = Entity::from_raw(2);
+        let e1 = Entity::from_bits(1);
+        let e2 = Entity::from_bits(2);
         
         hash.insert(e1, (10, 10), 0, 0); // At (10, 10)
         hash.insert(e2, (15, 10), 0, 0); // At (15, 10)
         
         let mut found = Vec::new();
-        hash.query_filtered_radius_callback((10, 10), 5, Entity::from_raw(99), None, |e| {
+        hash.query_filtered_radius_callback((10, 10), 5, Entity::from_bits(99), None, |e| {
             found.push(e);
         });
         
@@ -368,7 +436,7 @@ mod tests {
         assert!(found.contains(&e2)); // Exact distance 5 should be included
         
         let mut found2 = Vec::new();
-        hash.query_filtered_radius_callback((10, 10), 4, Entity::from_raw(99), None, |e| {
+        hash.query_filtered_radius_callback((10, 10), 4, Entity::from_bits(99), None, |e| {
             found2.push(e);
         });
         assert_eq!(found2.len(), 1);
@@ -378,7 +446,7 @@ mod tests {
     #[test]
     fn test_spatial_boundary_conditions() {
         let mut hash = TestSpatialHash::default();
-        let e1 = Entity::from_raw(1);
+        let e1 = Entity::from_bits(1);
         
         // At the zero boundary
         hash.insert(e1, (0, 0), 1, 0); // Covers (-1,-1) to (1,1). Outside should be ignored by BitBoard logic.
@@ -393,5 +461,142 @@ mod tests {
         assert!(hash.is_tile_occupied(255, 255));
         assert!(hash.is_tile_occupied(254, 254));
         assert!(!hash.is_tile_occupied(253, 253));
+    }
+
+    #[test]
+    fn test_spatial_query_circle() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = Entity::from_bits(1);
+        let e2 = Entity::from_bits(2);
+        
+        // (10, 10) から距離 5 の位置に配置
+        hash.insert(e1, (10, 15), 0, 0); // 距離 5.0 (ちょうど)
+        hash.insert(e2, (14, 14), 0, 0); // 距離 sqrt(4^2 + 4^2) = 5.65 (円の外だが正方形の内)
+        
+        let mut found = Vec::new();
+        hash.query_circle_callback((10, 10), 5.0, None, Entity::from_bits(99), |e| {
+            found.push(e);
+        });
+        
+        assert!(found.contains(&e1));
+        assert!(!found.contains(&e2), "Corner of the square should be excluded in circular query");
+    }
+
+    #[test]
+    fn test_spatial_query_sector() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = Entity::from_bits(1);
+        let e2 = Entity::from_bits(2);
+        
+        // (10, 10) から右方向に e1, 左方向に e2
+        hash.insert(e1, (15, 10), 0, 0); // 右 (0度)
+        hash.insert(e2, (5, 10), 0, 0);  // 左 (180度)
+        
+        let mut found = Vec::new();
+        // 右向き 90度の視界 ( -45度 〜 45度 )
+        hash.query_sector_callback((10, 10), 10.0, -45.0, 90.0, None, Entity::from_bits(99), |e| {
+            found.push(e);
+        });
+        
+        assert!(found.contains(&e1));
+        assert!(!found.contains(&e2));
+    }
+
+    #[test]
+    fn test_spatial_query_composite_proximity() {
+        let mut hash = TestSpatialHash::default();
+        let ally = Entity::from_bits(1);
+        let enemy = Entity::from_bits(2);
+        
+        // 味方を (10, 10) に、敵を (12, 12) に配置
+        hash.insert(ally, (10, 10), 0, 0); // Kind 0: Ally
+        hash.insert(enemy, (12, 12), 0, 1); // Kind 1: Enemy
+        
+        // 味方レイヤーを 3マス膨張させて「味方の周囲」マスクを作成
+        let proximity_mask = hash.layer(0).dilate(3);
+        
+        let mut found = Vec::new();
+        // マスク内かつ Kind 1 (Enemy) のエンティティを検索
+        hash.query_mask_callback(&proximity_mask, Some(1), Entity::from_bits(99), |e| {
+            found.push(e);
+        });
+        
+        assert!(found.contains(&enemy));
+        assert!(!found.contains(&ally));
+    }
+
+    #[test]
+    fn test_spatial_update_diff() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = Entity::from_bits(1);
+        
+        // 初期配置
+        hash.insert(e1, (10, 10), 1, 0);
+        assert!(hash.is_tile_occupied(10, 10));
+        assert!(hash.is_tile_occupied(11, 11));
+        
+        // 移動と半径変更
+        hash.update_diff(e1, (10, 10), 1, 0, (20, 20), 0, 0);
+        
+        // 古い場所は消えているはず
+        assert!(!hash.is_tile_occupied(10, 10));
+        assert!(!hash.is_tile_occupied(11, 11));
+        // 新しい場所が占有されている
+        assert!(hash.is_tile_occupied(20, 20));
+        assert!(!hash.is_tile_occupied(21, 21)); // 半径0なので
+    }
+
+    #[test]
+    fn test_spatial_query_mask_bounded() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = Entity::from_bits(1);
+        let e2 = Entity::from_bits(2);
+        
+        hash.insert(e1, (10, 10), 0, 0);
+        hash.insert(e2, (20, 20), 0, 0);
+        
+        // 画面全体を覆うマスクを作成
+        let mut full_mask = BitBoard::<256, 256>::default();
+        full_mask = !full_mask;
+        
+        let mut found = Vec::new();
+        // 範囲を (0,0) ~ (15,15) に限定して検索
+        hash.query_mask_bounded_callback(
+            &full_mask, 
+            None, 
+            Entity::from_bits(99), 
+            (0, 0), 
+            (15, 15), 
+            |e| { found.push(e); }
+        );
+        
+        assert_eq!(found.len(), 1);
+        assert!(found.contains(&e1));
+        assert!(!found.contains(&e2));
+    }
+
+    #[test]
+    fn test_spatial_static_layers() {
+        let mut hash = TestSpatialHash::default();
+        let mut wall_map = BitBoard::<256, 256>::default();
+        wall_map.set(5, 5, true);
+        wall_map.set(6, 6, true);
+        
+        assert_eq!(hash.static_revision(), 0);
+        
+        // 静的レイヤー (インデックス 0 とする) を同期
+        hash.full_sync_static_layer(0, &wall_map);
+        
+        assert_eq!(hash.static_revision(), 1);
+        
+        // 静的レイヤー自体は self.cells や presence には入らないが、
+        // self.static_layers[0] に記録される
+        // (現状の public API では is_tile_occupied は presence のみをみる)
+        // もし将来的に static も含めた判定が必要な場合は、レイヤー直接アクセサが使われる
+        assert!(!hash.is_tile_occupied(5, 5)); 
+        
+        // query_mask_callback で静的レイヤーを指定して引けるか
+        // (現状は query は動的セルのみ。静的レイヤーとの AND 演算は利用者側で行う想定)
+        // ここではクラッシュせず Revision が上がることを確認すれば十分。
     }
 }
