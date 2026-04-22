@@ -80,11 +80,6 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         &mut self.kind_boards[kind_idx]
     }
 
-    /// 座標から配列インデックスを取得
-    #[inline(always)]
-    fn get_index(x: i32, y: i32) -> Option<usize> {
-        BitBoard::<W, H>::tile_to_index(x, y)
-    }
 
     /// エンティティの各セルへの登録内容を差分更新
     pub fn update_diff(
@@ -536,7 +531,7 @@ mod tests {
         assert!(hash.is_tile_occupied(11, 11));
         
         // 移動と半径変更
-        hash.update_diff(e1, (10, 10), 1, 0, (20, 20), 0, 0);
+        hash.update_diff(e1, (20, 20), 0, 0);
         
         // 古い場所は消えているはず
         assert!(!hash.is_tile_occupied(10, 10));
@@ -585,7 +580,7 @@ mod tests {
         assert_eq!(hash.static_revision(), 0);
         
         // 静的レイヤー (インデックス 0 とする) を同期
-        hash.full_sync_static_layer(0, &wall_map);
+        hash.full_sync_static_layer(0, &wall_map, 1);
         
         assert_eq!(hash.static_revision(), 1);
         
