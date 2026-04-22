@@ -1,7 +1,11 @@
-use bevy::ecs::entity::EntityHashMap;
-use bevy::prelude::*;
-use lexaos_bitboard::BitBoard;
+use hashbrown::HashMap;
+use ahash::RandomState;
+use core::hash::Hash;
 use smallvec::SmallVec;
+use lexaos_bitboard::BitBoard;
+
+#[cfg(feature = "bevy")]
+use bevy::prelude::*;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct EntityEntry {
@@ -11,14 +15,17 @@ struct EntityEntry {
 }
 
 /// タイル座標ベースのエンティティ位置を管理する空間ハッシュ (汎用版)
+/// ID: エンティティを識別する型 (Entity, u32, etc)
 /// const E: エンティティ種別の数 (Dynamic layers)
 /// const S: 静的レイヤーの数 (Static layers like Terrain)
-#[derive(Resource)]
-pub struct SpatialHash<const W: usize, const H: usize, const E: usize, const S: usize> {
-    /// セル管理（y * W + x でアクセス）。(Entity, KindIdx) のペアで保持し、クエリ時のハッシュマップ参照を排除。
-    cells: Box<[SmallVec<[(Entity, u8); 4]>]>,
+#[cfg_attr(feature = "bevy", derive(Resource))]
+pub struct SpatialHash<ID, const W: usize, const H: usize, const E: usize, const S: usize> 
+where ID: Copy + Eq + Hash
+{
+    /// セル管理（y * W + x でアクセス）。(ID, KindIdx) のペアで保持。
+    cells: Box<[SmallVec<[(ID, u8); 4]>]>,
     /// エンティティの管理情報（履歴保持・削除用）
-    entity_info: EntityHashMap<EntityEntry>,
+    entity_info: HashMap<ID, EntityEntry, RandomState>,
     /// 存在判定用のビットマップ
     presence: BitBoard<W, H>,
     /// 種別ごとの高速存在判定ビットマップ (Eレイヤー)
@@ -29,14 +36,15 @@ pub struct SpatialHash<const W: usize, const H: usize, const E: usize, const S: 
     static_revision: u32,
 }
 
-impl<const W: usize, const H: usize, const E: usize, const S: usize> Default
-    for SpatialHash<W, H, E, S>
+impl<ID, const W: usize, const H: usize, const E: usize, const S: usize> Default
+    for SpatialHash<ID, W, H, E, S>
+where ID: Copy + Eq + Hash
 {
     fn default() -> Self {
         let cells = vec![SmallVec::new(); W * H].into_boxed_slice();
         Self {
             cells,
-            entity_info: EntityHashMap::default(),
+            entity_info: HashMap::with_hasher(RandomState::default()),
             presence: BitBoard::default(),
             kind_boards: std::array::from_fn(|_| BitBoard::default()),
             static_layers: std::array::from_fn(|_| BitBoard::default()),
@@ -45,7 +53,9 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> Default
     }
 }
 
-impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash<W, H, E, S> {
+impl<ID, const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash<ID, W, H, E, S> 
+where ID: Copy + Eq + Hash
+{
     /// 指定インデックスのエンティティレイヤーを取得
     #[inline(always)]
     pub fn layer(&self, kind_idx: usize) -> &BitBoard<W, H> {
@@ -84,12 +94,12 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
     /// エンティティの各セルへの登録内容を差分更新
     pub fn update_diff(
         &mut self,
-        entity: Entity,
+        id: ID,
         new_center: (i32, i32),
         new_radius: i32,
         new_kind_idx: usize,
     ) {
-        let old_info = if let Some(info) = self.entity_info.get(&entity) {
+        let old_info = if let Some(info) = self.entity_info.get(&id) {
             if info.center == new_center
                 && info.radius == new_radius
                 && info.kind_idx == new_kind_idx
@@ -97,13 +107,13 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
                 return;
             }
             if info.radius != new_radius || info.kind_idx != new_kind_idx {
-                self.remove(entity);
-                self.insert(entity, new_center, new_radius, new_kind_idx);
+                self.remove(id);
+                self.insert(id, new_center, new_radius, new_kind_idx);
                 return;
             }
             *info
         } else {
-            self.insert(entity, new_center, new_radius, new_kind_idx);
+            self.insert(id, new_center, new_radius, new_kind_idx);
             return;
         };
 
@@ -120,7 +130,7 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         for x in old_min.0..=old_max.0 {
             for y in old_min.1..=old_max.1 {
                 if x < new_min.0 || x > new_max.0 || y < new_min.1 || y > new_max.1 {
-                    self.cell_remove(x, y, entity, kind_idx);
+                    self.cell_remove(x, y, id, kind_idx);
                 }
             }
         }
@@ -129,35 +139,63 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         for x in new_min.0..=new_max.0 {
             for y in new_min.1..=new_max.1 {
                 if x < old_min.0 || x > old_max.0 || y < old_min.1 || y > old_max.1 {
-                    self.cell_insert(x, y, entity, kind_idx);
+                    self.cell_insert(x, y, id, kind_idx);
                 }
             }
         }
 
-        if let Some(info) = self.entity_info.get_mut(&entity) {
+        if let Some(info) = self.entity_info.get_mut(&id) {
             info.center = new_center;
         }
     }
 
-    fn cell_insert(&mut self, x: i32, y: i32, entity: Entity, kind_idx: usize) {
+    /// しきい値ベースのスロットリング更新。
+    /// 前回の更新位置から threshold (タイル単位) 未満の移動であれば、セル跨ぎがない限り更新をスキップ。
+    pub fn update_with_threshold(
+        &mut self,
+        id: ID,
+        new_center: (i32, i32),
+        new_radius: i32,
+        new_kind_idx: usize,
+        threshold: i32,
+    ) {
+        if let Some(info) = self.entity_info.get(&id) {
+            let dx = (new_center.0 - info.center.0).abs();
+            let dy = (new_center.1 - info.center.1).abs();
+            
+            // 半径や種別が変わっておらず、かつ移動距離がしきい値未満ならスキップ
+            if dx < threshold && dy < threshold 
+               && info.radius == new_radius 
+               && info.kind_idx == new_kind_idx 
+            {
+                // セル境界を跨いでいないかチェック（半径が1以上の場合はより厳密な判定が必要だが、
+                // ここでは単純な位置ベースのスロットリングとする）
+                return;
+            }
+        }
+        
+        self.update_diff(id, new_center, new_radius, new_kind_idx);
+    }
+
+    fn cell_insert(&mut self, x: i32, y: i32, id: ID, kind_idx: usize) {
         if let Some(idx) = BitBoard::<W, H>::tile_to_index(x, y) {
-            self.cells[idx].push((entity, kind_idx as u8));
+            self.cells[idx].push((id, kind_idx as u8));
             self.presence.set(x, y, true);
             self.layer_mut(kind_idx).set(x, y, true);
         }
     }
 
-    fn cell_remove(&mut self, x: i32, y: i32, entity: Entity, kind_idx: usize) {
+    fn cell_remove(&mut self, x: i32, y: i32, id: ID, kind_idx: usize) {
         if let Some(idx) = BitBoard::<W, H>::tile_to_index(x, y) {
             let list = &mut self.cells[idx];
-            if let Some(pos) = list.iter().position(|&(e, _)| e == entity) {
+            if let Some(pos) = list.iter().position(|&(e, _)| e == id) {
                 list.swap_remove(pos);
             }
             if list.is_empty() {
                 self.presence.set(x, y, false);
             }
             
-            // info を引かずにリスト内の種別情報だけで BitBoard 更新判定が可能
+            // list 内の種別情報だけで BitBoard 更新判定が可能
             let has_same_kind = list.iter().any(|&(_, k)| k == kind_idx as u8);
             if !has_same_kind {
                 self.layer_mut(kind_idx).set(x, y, false);
@@ -165,7 +203,7 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         }
     }
 
-    pub fn insert(&mut self, entity: Entity, tile_pos: (i32, i32), radius: i32, kind_idx: usize) {
+    pub fn insert(&mut self, id: ID, tile_pos: (i32, i32), radius: i32, kind_idx: usize) {
         // 1. 中心点から dilate を用いて一括でマスクを生成 (O(log radius))
         let mut mask = BitBoard::<W, H>::default();
         mask.set(tile_pos.0, tile_pos.1, true);
@@ -182,13 +220,13 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         // 3. セル情報への登録 (iter_set_bits により、セットされたビットのみを効率的に走査)
         for (x, y) in mask.iter_set_bits() {
             if let Some(idx) = BitBoard::<W, H>::tile_to_index(x, y) {
-                self.cells[idx].push((entity, kind_idx as u8));
+                self.cells[idx].push((id, kind_idx as u8));
             }
         }
 
         // 4. 管理情報の保存
         self.entity_info.insert(
-            entity,
+            id,
             EntityEntry {
                 center: tile_pos,
                 radius,
@@ -197,14 +235,14 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         );
     }
 
-    pub fn remove(&mut self, entity: Entity) {
-        if let Some(entry) = self.entity_info.remove(&entity) {
+    pub fn remove(&mut self, id: ID) {
+        if let Some(entry) = self.entity_info.remove(&id) {
             for dx in -entry.radius..=entry.radius {
                 for dy in -entry.radius..=entry.radius {
                     self.cell_remove(
                         entry.center.0 + dx,
                         entry.center.1 + dy,
-                        entity,
+                        id,
                         entry.kind_idx,
                     );
                 }
@@ -214,12 +252,12 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
 
     pub fn update(
         &mut self,
-        entity: Entity,
+        id: ID,
         new_tile_pos: (i32, i32),
         radius: i32,
         kind_idx: usize,
     ) {
-        self.update_diff(entity, new_tile_pos, radius, kind_idx);
+        self.update_diff(id, new_tile_pos, radius, kind_idx);
     }
 
     pub fn mask_visibility(
@@ -239,10 +277,10 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         center: (i32, i32),
         radius: f32,
         kind_idx: Option<usize>,
-        exclude: Entity,
+        exclude: ID,
         mut callback: F,
     ) where
-        F: FnMut(Entity),
+        F: FnMut(ID),
     {
         // 1. 円形マスクの作成
         let circle_mask = BitBoard::<W, H>::mask_sector(center.0, center.1, radius, 0.0, 360.0);
@@ -274,10 +312,10 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         start_angle_deg: f32,
         sweep_angle_deg: f32,
         kind_idx: Option<usize>,
-        exclude: Entity,
+        exclude: ID,
         mut callback: F,
     ) where
-        F: FnMut(Entity),
+        F: FnMut(ID),
     {
         let sector_mask = BitBoard::<W, H>::mask_sector(center.0, center.1, radius, start_angle_deg, sweep_angle_deg);
         
@@ -303,11 +341,11 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         &self,
         center: (i32, i32),
         radius: i32,
-        exclude: Entity,
+        exclude: ID,
         kind_idx: Option<usize>,
         mut callback: F,
     ) where
-        F: FnMut(Entity),
+        F: FnMut(ID),
     {
         let target_board = match kind_idx {
             Some(k) => self.layer(k),
@@ -336,10 +374,10 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         &self,
         mask: &BitBoard<W, H>,
         kind_idx: Option<usize>,
-        exclude: Entity,
+        exclude: ID,
         mut callback: F,
     ) where
-        F: FnMut(Entity),
+        F: FnMut(ID),
     {
         let target_board = match kind_idx {
             Some(k) => self.layer(k),
@@ -361,12 +399,12 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
         &self,
         mask: &BitBoard<W, H>,
         kind_idx: Option<usize>,
-        exclude: Entity,
+        exclude: ID,
         min_tile: (i32, i32),
         max_tile: (i32, i32),
         mut callback: F,
     ) where
-        F: FnMut(Entity),
+        F: FnMut(ID),
     {
         let target_board = match kind_idx {
             Some(k) => self.layer(k),
@@ -395,12 +433,13 @@ impl<const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash
 mod tests {
     use super::*;
 
-    type TestSpatialHash = SpatialHash<256, 256, 2, 5>;
+    // テスト用にダミーのIDとして u32 を使用
+    type TestSpatialHash = SpatialHash<u32, 256, 256, 2, 5>;
 
     #[test]
     fn test_spatial_insert_remove() {
         let mut hash = TestSpatialHash::default();
-        let entity = Entity::from_bits(1);
+        let entity = 1u32;
         
         hash.insert(entity, (10, 10), 1, 0);
         assert!(hash.is_tile_occupied(10, 10));
@@ -415,14 +454,14 @@ mod tests {
     #[test]
     fn test_spatial_query_radius() {
         let mut hash = TestSpatialHash::default();
-        let e1 = Entity::from_bits(1);
-        let e2 = Entity::from_bits(2);
+        let e1 = 1u32;
+        let e2 = 2u32;
         
         hash.insert(e1, (10, 10), 0, 0); // At (10, 10)
         hash.insert(e2, (15, 10), 0, 0); // At (15, 10)
         
         let mut found = Vec::new();
-        hash.query_filtered_radius_callback((10, 10), 5, Entity::from_bits(99), None, |e| {
+        hash.query_filtered_radius_callback((10, 10), 5, 99u32, None, |e| {
             found.push(e);
         });
         
@@ -431,7 +470,7 @@ mod tests {
         assert!(found.contains(&e2)); // Exact distance 5 should be included
         
         let mut found2 = Vec::new();
-        hash.query_filtered_radius_callback((10, 10), 4, Entity::from_bits(99), None, |e| {
+        hash.query_filtered_radius_callback((10, 10), 4, 99u32, None, |e| {
             found2.push(e);
         });
         assert_eq!(found2.len(), 1);
@@ -441,7 +480,7 @@ mod tests {
     #[test]
     fn test_spatial_boundary_conditions() {
         let mut hash = TestSpatialHash::default();
-        let e1 = Entity::from_bits(1);
+        let e1 = 1u32;
         
         // At the zero boundary
         hash.insert(e1, (0, 0), 1, 0); // Covers (-1,-1) to (1,1). Outside should be ignored by BitBoard logic.
@@ -461,15 +500,15 @@ mod tests {
     #[test]
     fn test_spatial_query_circle() {
         let mut hash = TestSpatialHash::default();
-        let e1 = Entity::from_bits(1);
-        let e2 = Entity::from_bits(2);
+        let e1 = 1u32;
+        let e2 = 2u32;
         
         // (10, 10) から距離 5 の位置に配置
         hash.insert(e1, (10, 15), 0, 0); // 距離 5.0 (ちょうど)
         hash.insert(e2, (14, 14), 0, 0); // 距離 sqrt(4^2 + 4^2) = 5.65 (円の外だが正方形の内)
         
         let mut found = Vec::new();
-        hash.query_circle_callback((10, 10), 5.0, None, Entity::from_bits(99), |e| {
+        hash.query_circle_callback((10, 10), 5.0, None, 99u32, |e| {
             found.push(e);
         });
         
@@ -480,8 +519,8 @@ mod tests {
     #[test]
     fn test_spatial_query_sector() {
         let mut hash = TestSpatialHash::default();
-        let e1 = Entity::from_bits(1);
-        let e2 = Entity::from_bits(2);
+        let e1 = 1u32;
+        let e2 = 2u32;
         
         // (10, 10) から右方向に e1, 左方向に e2
         hash.insert(e1, (15, 10), 0, 0); // 右 (0度)
@@ -489,7 +528,7 @@ mod tests {
         
         let mut found = Vec::new();
         // 右向き 90度の視界 ( -45度 〜 45度 )
-        hash.query_sector_callback((10, 10), 10.0, -45.0, 90.0, None, Entity::from_bits(99), |e| {
+        hash.query_sector_callback((10, 10), 10.0, -45.0, 90.0, None, 99u32, |e| {
             found.push(e);
         });
         
@@ -500,8 +539,8 @@ mod tests {
     #[test]
     fn test_spatial_query_composite_proximity() {
         let mut hash = TestSpatialHash::default();
-        let ally = Entity::from_bits(1);
-        let enemy = Entity::from_bits(2);
+        let ally = 1u32;
+        let enemy = 2u32;
         
         // 味方を (10, 10) に、敵を (12, 12) に配置
         hash.insert(ally, (10, 10), 0, 0); // Kind 0: Ally
@@ -512,7 +551,7 @@ mod tests {
         
         let mut found = Vec::new();
         // マスク内かつ Kind 1 (Enemy) のエンティティを検索
-        hash.query_mask_callback(&proximity_mask, Some(1), Entity::from_bits(99), |e| {
+        hash.query_mask_callback(&proximity_mask, Some(1), 99u32, |e| {
             found.push(e);
         });
         
@@ -523,7 +562,7 @@ mod tests {
     #[test]
     fn test_spatial_update_diff() {
         let mut hash = TestSpatialHash::default();
-        let e1 = Entity::from_bits(1);
+        let e1 = 1u32;
         
         // 初期配置
         hash.insert(e1, (10, 10), 1, 0);
@@ -544,8 +583,8 @@ mod tests {
     #[test]
     fn test_spatial_query_mask_bounded() {
         let mut hash = TestSpatialHash::default();
-        let e1 = Entity::from_bits(1);
-        let e2 = Entity::from_bits(2);
+        let e1 = 1u32;
+        let e2 = 2u32;
         
         hash.insert(e1, (10, 10), 0, 0);
         hash.insert(e2, (20, 20), 0, 0);
@@ -559,7 +598,7 @@ mod tests {
         hash.query_mask_bounded_callback(
             &full_mask, 
             None, 
-            Entity::from_bits(99), 
+            99u32, 
             (0, 0), 
             (15, 15), 
             |e| { found.push(e); }
