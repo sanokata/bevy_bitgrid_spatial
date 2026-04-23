@@ -2,7 +2,8 @@ use hashbrown::HashMap;
 use ahash::RandomState;
 use core::hash::Hash;
 use smallvec::SmallVec;
-use lexaos_bitboard::BitBoard;
+use lexaos_bitboard::{BitBoard, BitLayout, RowMajorLayout};
+use std::marker::PhantomData;
 
 #[cfg(feature = "bevy")]
 use bevy::prelude::*;
@@ -18,30 +19,33 @@ struct EntityEntry {
 /// ID: エンティティを識別する型 (Entity, u32, etc)
 /// const E: エンティティ種別の数 (Dynamic layers)
 /// const S: 静的レイヤーの数 (Static layers like Terrain)
+/// L: メモリレイアウト
 #[cfg_attr(feature = "bevy", derive(Resource))]
-pub struct SpatialHash<ID, const W: usize, const H: usize, const E: usize, const S: usize> 
-where ID: Copy + Eq + Hash
+pub struct SpatialHash<ID, const W: usize, const H: usize, const E: usize, const S: usize, L = RowMajorLayout> 
+where ID: Copy + Eq + Hash, L: BitLayout<W, H>
 {
     /// セル管理（y * W + x でアクセス）。(ID, KindIdx) のペアで保持。
     cells: Box<[SmallVec<[(ID, u8); 4]>]>,
     /// エンティティの管理情報（履歴保持・削除用）
     entity_info: HashMap<ID, EntityEntry, RandomState>,
     /// 存在判定用のビットマップ
-    presence: BitBoard<W, H>,
+    presence: BitBoard<W, H, L>,
     /// 種別ごとの高速存在判定ビットマップ (Eレイヤー)
-    kind_boards: [BitBoard<W, H>; E],
+    kind_boards: [BitBoard<W, H, L>; E],
     /// 地形などの静的レイヤーのコピー (Sレイヤー)
-    static_layers: [BitBoard<W, H>; S],
+    static_layers: [BitBoard<W, H, L>; S],
     /// 静的レイヤーの同期用リビジョン
     static_revision: u32,
+    _layout: PhantomData<L>,
 }
 
-impl<ID, const W: usize, const H: usize, const E: usize, const S: usize> Default
-    for SpatialHash<ID, W, H, E, S>
+impl<ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitLayout<W, H>> Default
+    for SpatialHash<ID, W, H, E, S, L>
 where ID: Copy + Eq + Hash
 {
     fn default() -> Self {
-        let cells = vec![SmallVec::new(); W * H].into_boxed_slice();
+        let total_cells = L::total_words() * 64;
+        let cells = vec![SmallVec::new(); total_cells].into_boxed_slice();
         Self {
             cells,
             entity_info: HashMap::with_hasher(RandomState::default()),
@@ -49,22 +53,23 @@ where ID: Copy + Eq + Hash
             kind_boards: std::array::from_fn(|_| BitBoard::default()),
             static_layers: std::array::from_fn(|_| BitBoard::default()),
             static_revision: 0,
+            _layout: PhantomData,
         }
     }
 }
 
-impl<ID, const W: usize, const H: usize, const E: usize, const S: usize> SpatialHash<ID, W, H, E, S> 
+impl<ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitLayout<W, H>> SpatialHash<ID, W, H, E, S, L> 
 where ID: Copy + Eq + Hash
 {
     /// 指定インデックスのエンティティレイヤーを取得
     #[inline(always)]
-    pub fn layer(&self, kind_idx: usize) -> &BitBoard<W, H> {
+    pub fn layer(&self, kind_idx: usize) -> &BitBoard<W, H, L> {
         &self.kind_boards[kind_idx]
     }
 
     /// 指定インデックスの静的レイヤーを取得
     #[inline(always)]
-    pub fn static_layer(&self, layer_idx: usize) -> &BitBoard<W, H> {
+    pub fn static_layer(&self, layer_idx: usize) -> &BitBoard<W, H, L> {
         &self.static_layers[layer_idx]
     }
 
@@ -72,7 +77,7 @@ where ID: Copy + Eq + Hash
     pub fn full_sync_static_layer(
         &mut self,
         layer_idx: usize,
-        board: &BitBoard<W, H>,
+        board: &BitBoard<W, H, L>,
         revision: u32,
     ) {
         if layer_idx < S {
@@ -86,7 +91,7 @@ where ID: Copy + Eq + Hash
     }
 
     #[inline(always)]
-    fn layer_mut(&mut self, kind_idx: usize) -> &mut BitBoard<W, H> {
+    fn layer_mut(&mut self, kind_idx: usize) -> &mut BitBoard<W, H, L> {
         &mut self.kind_boards[kind_idx]
     }
 
@@ -178,7 +183,7 @@ where ID: Copy + Eq + Hash
     }
 
     fn cell_insert(&mut self, x: i32, y: i32, id: ID, kind_idx: usize) {
-        if let Some(idx) = BitBoard::<W, H>::tile_to_index(x, y) {
+        if let Some(idx) = BitBoard::<W, H, L>::tile_to_index(x, y) {
             self.cells[idx].push((id, kind_idx as u8));
             self.presence.set(x, y, true);
             self.layer_mut(kind_idx).set(x, y, true);
@@ -186,7 +191,7 @@ where ID: Copy + Eq + Hash
     }
 
     fn cell_remove(&mut self, x: i32, y: i32, id: ID, kind_idx: usize) {
-        if let Some(idx) = BitBoard::<W, H>::tile_to_index(x, y) {
+        if let Some(idx) = BitBoard::<W, H, L>::tile_to_index(x, y) {
             let list = &mut self.cells[idx];
             if let Some(pos) = list.iter().position(|&(e, _)| e == id) {
                 list.swap_remove(pos);
@@ -205,7 +210,7 @@ where ID: Copy + Eq + Hash
 
     pub fn insert(&mut self, id: ID, tile_pos: (i32, i32), radius: i32, kind_idx: usize) {
         // 1. 中心点から dilate を用いて一括でマスクを生成 (O(log radius))
-        let mut mask = BitBoard::<W, H>::default();
+        let mut mask = BitBoard::<W, H, L>::default();
         mask.set(tile_pos.0, tile_pos.1, true);
         let mask = if radius > 0 {
             mask.dilate(radius as u32)
@@ -219,7 +224,7 @@ where ID: Copy + Eq + Hash
 
         // 3. セル情報への登録 (iter_set_bits により、セットされたビットのみを効率的に走査)
         for (x, y) in mask.iter_set_bits() {
-            if let Some(idx) = BitBoard::<W, H>::tile_to_index(x, y) {
+            if let Some(idx) = BitBoard::<W, H, L>::tile_to_index(x, y) {
                 self.cells[idx].push((id, kind_idx as u8));
             }
         }
@@ -266,7 +271,7 @@ where ID: Copy + Eq + Hash
         cy: i32,
         radius: f32,
         opaque_layer_idx: usize,
-    ) -> BitBoard<W, H> {
+    ) -> BitBoard<W, H, L> {
         let opaque_board = self.static_layer(opaque_layer_idx);
         opaque_board.mask_visibility(cx, cy, radius, opaque_board)
     }
@@ -283,7 +288,7 @@ where ID: Copy + Eq + Hash
         F: FnMut(ID),
     {
         // 1. 円形マスクの作成
-        let circle_mask = BitBoard::<W, H>::mask_sector(center.0, center.1, radius, 0.0, 360.0);
+        let circle_mask = BitBoard::<W, H, L>::mask_sector(center.0, center.1, radius, 0.0, 360.0);
         
         // 2. 対象となるレイヤーボードを選択
         let target_board = match kind_idx {
@@ -317,7 +322,7 @@ where ID: Copy + Eq + Hash
     ) where
         F: FnMut(ID),
     {
-        let sector_mask = BitBoard::<W, H>::mask_sector(center.0, center.1, radius, start_angle_deg, sweep_angle_deg);
+        let sector_mask = BitBoard::<W, H, L>::mask_sector(center.0, center.1, radius, start_angle_deg, sweep_angle_deg);
         
         let target_board = match kind_idx {
             Some(k) => self.layer(k),
@@ -372,7 +377,7 @@ where ID: Copy + Eq + Hash
     /// 任意のマスクと種別（任意）でエンティティを検索
     pub fn query_mask_callback<F>(
         &self,
-        mask: &BitBoard<W, H>,
+        mask: &BitBoard<W, H, L>,
         kind_idx: Option<usize>,
         exclude: ID,
         mut callback: F,
@@ -397,7 +402,7 @@ where ID: Copy + Eq + Hash
     /// 任意のマスク、種別（任意）、および範囲制限でエンティティを検索
     pub fn query_mask_bounded_callback<F>(
         &self,
-        mask: &BitBoard<W, H>,
+        mask: &BitBoard<W, H, L>,
         kind_idx: Option<usize>,
         exclude: ID,
         min_tile: (i32, i32),
@@ -590,7 +595,7 @@ mod tests {
         hash.insert(e2, (20, 20), 0, 0);
         
         // 画面全体を覆うマスクを作成
-        let mut full_mask = BitBoard::<256, 256>::default();
+        let mut full_mask = BitBoard::<256, 256, RowMajorLayout>::default();
         full_mask = !full_mask;
         
         let mut found = Vec::new();
@@ -612,7 +617,7 @@ mod tests {
     #[test]
     fn test_spatial_static_layers() {
         let mut hash = TestSpatialHash::default();
-        let mut wall_map = BitBoard::<256, 256>::default();
+        let mut wall_map = BitBoard::<256, 256, RowMajorLayout>::default();
         wall_map.set(5, 5, true);
         wall_map.set(6, 6, true);
         
