@@ -96,7 +96,7 @@ where ID: Copy + Eq + Hash
     }
 
 
-    /// エンティティの各セルへの登録内容を差分更新
+    /// エンティティの各セルへの登録内容を差分更新 (最適化版)
     pub fn update_diff(
         &mut self,
         id: ID,
@@ -105,12 +105,14 @@ where ID: Copy + Eq + Hash
         new_kind_idx: usize,
     ) {
         let old_info = if let Some(info) = self.entity_info.get(&id) {
+            // 位置も半径も種別も変わっていなければ何もしない
             if info.center == new_center
                 && info.radius == new_radius
                 && info.kind_idx == new_kind_idx
             {
                 return;
             }
+            // 半径または種別が変わった場合は、マスク形状が変わるため単純な差分更新ではなく再登録
             if info.radius != new_radius || info.kind_idx != new_kind_idx {
                 self.remove(id);
                 self.insert(id, new_center, new_radius, new_kind_idx);
@@ -126,29 +128,34 @@ where ID: Copy + Eq + Hash
         let radius = new_radius;
         let kind_idx = new_kind_idx;
 
-        let old_min = (old_center.0 - radius, old_center.1 - radius);
-        let old_max = (old_center.0 + radius, old_center.1 + radius);
-        let new_min = (new_center.0 - radius, new_center.1 - radius);
-        let new_max = (new_center.0 + radius, new_center.1 + radius);
+        // 1. BitBoard を用いて新旧のマスクを作成し、差分ビット（追加・削除すべき座標）を抽出
+        // 矩形範囲を扱うため mask_rect を使用
+        let old_mask = BitBoard::<W, H, L>::mask_rect(
+            old_center.0 - radius,
+            old_center.1 - radius,
+            radius * 2 + 1,
+            radius * 2 + 1,
+        );
+        let new_mask = BitBoard::<W, H, L>::mask_rect(
+            new_center.0 - radius,
+            new_center.1 - radius,
+            radius * 2 + 1,
+            radius * 2 + 1,
+        );
 
-        // 離れたセルから除去
-        for x in old_min.0..=old_max.0 {
-            for y in old_min.1..=old_max.1 {
-                if x < new_min.0 || x > new_max.0 || y < new_min.1 || y > new_max.1 {
-                    self.cell_remove(x, y, id, kind_idx);
-                }
-            }
+        // 消去すべき座標: 旧にあって新にないビット
+        let remove_mask = &old_mask & &!&new_mask;
+        for (x, y) in remove_mask.iter_set_bits() {
+            self.cell_remove(x, y, id, kind_idx);
         }
 
-        // 新しいセルへ挿入
-        for x in new_min.0..=new_max.0 {
-            for y in new_min.1..=new_max.1 {
-                if x < old_min.0 || x > old_max.0 || y < old_min.1 || y > old_max.1 {
-                    self.cell_insert(x, y, id, kind_idx);
-                }
-            }
+        // 追加すべき座標: 新にあって旧にないビット
+        let insert_mask = &new_mask & &!&old_mask;
+        for (x, y) in insert_mask.iter_set_bits() {
+            self.cell_insert(x, y, id, kind_idx);
         }
 
+        // 管理情報の位置を更新
         if let Some(info) = self.entity_info.get_mut(&id) {
             info.center = new_center;
         }
@@ -242,15 +249,14 @@ where ID: Copy + Eq + Hash
 
     pub fn remove(&mut self, id: ID) {
         if let Some(entry) = self.entity_info.remove(&id) {
-            for dx in -entry.radius..=entry.radius {
-                for dy in -entry.radius..=entry.radius {
-                    self.cell_remove(
-                        entry.center.0 + dx,
-                        entry.center.1 + dy,
-                        id,
-                        entry.kind_idx,
-                    );
-                }
+            let mask = BitBoard::<W, H, L>::mask_rect(
+                entry.center.0 - entry.radius,
+                entry.center.1 - entry.radius,
+                entry.radius * 2 + 1,
+                entry.radius * 2 + 1,
+            );
+            for (x, y) in mask.iter_set_bits() {
+                self.cell_remove(x, y, id, entry.kind_idx);
             }
         }
     }
@@ -273,7 +279,20 @@ where ID: Copy + Eq + Hash
         opaque_layer_idx: usize,
     ) -> BitBoard<W, H, L> {
         let opaque_board = self.static_layer(opaque_layer_idx);
-        opaque_board.mask_visibility(cx, cy, radius, opaque_board)
+        BitBoard::<W, H, L>::mask_visibility(cx, cy, radius, opaque_board)
+    }
+
+    /// 既存のバッファを使用して視界マスクを計算（アロケーションフリー）
+    pub fn mask_visibility_into(
+        &self,
+        cx: i32,
+        cy: i32,
+        radius: f32,
+        opaque_layer_idx: usize,
+        out: &mut BitBoard<W, H, L>,
+    ) {
+        let opaque_board = self.static_layer(opaque_layer_idx);
+        out.mask_visibility_into(cx, cy, radius, opaque_board);
     }
 
     /// 円形範囲内のエンティティを検索 (正確な半径判定)
@@ -440,6 +459,7 @@ mod tests {
 
     // テスト用にダミーのIDとして u32 を使用
     type TestSpatialHash = SpatialHash<u32, 256, 256, 2, 5>;
+    type TestBoard = BitBoard<256, 256>;
 
     #[test]
     fn test_spatial_insert_remove() {
@@ -619,23 +639,198 @@ mod tests {
         let mut hash = TestSpatialHash::default();
         let mut wall_map = BitBoard::<256, 256, RowMajorLayout>::default();
         wall_map.set(5, 5, true);
-        wall_map.set(6, 6, true);
         
         assert_eq!(hash.static_revision(), 0);
+        hash.full_sync_static_layer(0, &wall_map, 1);
+        assert_eq!(hash.static_revision(), 1);
+        assert!(!hash.is_tile_occupied(5, 5)); 
+    }
+
+    #[test]
+    fn test_spatial_update_with_threshold() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = 1u32;
         
-        // 静的レイヤー (インデックス 0 とする) を同期
+        hash.insert(e1, (10, 10), 0, 0);
+        
+        // しきい値 5。距離 2 の移動ならスキップされるはず
+        hash.update_with_threshold(e1, (12, 10), 0, 0, 5);
+        
+        let info = hash.entity_info.get(&e1).unwrap();
+        assert_eq!(info.center, (10, 10), "Update should be throttled");
+        
+        // 距離 6 の移動なら更新されるはず
+        hash.update_with_threshold(e1, (16, 10), 0, 0, 5);
+        let info2 = hash.entity_info.get(&e1).unwrap();
+        assert_eq!(info2.center, (16, 10), "Update should be applied");
+    }
+
+    #[test]
+    fn test_spatial_mask_visibility() {
+        let mut hash = TestSpatialHash::default();
+        // 5x5 の位置に壁を設置 (静的レイヤー 0)
+        let mut wall_map = BitBoard::<256, 256, RowMajorLayout>::default();
+        wall_map.set(12, 10, true); 
         hash.full_sync_static_layer(0, &wall_map, 1);
         
-        assert_eq!(hash.static_revision(), 1);
+        // (10, 10) から半径 5 で視界を計算
+        // (12, 10) の壁の向こう側 (14, 10) は見えないはず
+        let vis = hash.mask_visibility(10, 10, 5.0, 0);
         
-        // 静的レイヤー自体は self.cells や presence には入らないが、
-        // self.static_layers[0] に記録される
-        // (現状の public API では is_tile_occupied は presence のみをみる)
-        // もし将来的に static も含めた判定が必要な場合は、レイヤー直接アクセサが使われる
-        assert!(!hash.is_tile_occupied(5, 5)); 
+        assert!(vis.get(11, 10));
+        assert!(vis.get(12, 10)); // 壁自体は見えている
+        assert!(!vis.get(14, 10), "Shadowcasting should work through SpatialHash wrapper");
+    }
+
+    #[test]
+    fn test_spatial_multiple_entities_overlap() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = 1u32;
+        let e2 = 2u32;
         
-        // query_mask_callback で静的レイヤーを指定して引けるか
-        // (現状は query は動的セルのみ。静的レイヤーとの AND 演算は利用者側で行う想定)
-        // ここではクラッシュせず Revision が上がることを確認すれば十分。
+        hash.insert(e1, (10, 10), 0, 0);
+        hash.insert(e2, (10, 10), 0, 0);
+        
+        assert!(hash.is_tile_occupied(10, 10));
+        assert_eq!(hash.cells[TestBoard::tile_to_index(10, 10).unwrap()].len(), 2);
+        
+        hash.remove(e1);
+        assert!(hash.is_tile_occupied(10, 10), "Still occupied by e2");
+        assert_eq!(hash.cells[TestBoard::tile_to_index(10, 10).unwrap()].len(), 1);
+        
+        hash.remove(e2);
+        assert!(!hash.is_tile_occupied(10, 10));
+    }
+
+    #[test]
+    fn test_spatial_update_complex() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = 1u32;
+        
+        hash.insert(e1, (10, 10), 1, 0);
+        
+        // 移動 + 半径変更 + 種別変更
+        hash.update_diff(e1, (20, 20), 0, 1);
+        
+        assert!(!hash.is_tile_occupied(10, 10));
+        assert!(hash.is_tile_occupied(20, 20));
+        assert!(hash.layer(1).get(20, 20));
+        assert!(!hash.layer(0).get(20, 20));
+    }
+
+    #[test]
+    fn test_spatial_query_exclude_logic() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = 1u32;
+        let e2 = 2u32;
+        
+        hash.insert(e1, (10, 10), 0, 0);
+        hash.insert(e2, (11, 10), 0, 0);
+        
+        let mut found = Vec::new();
+        // e1 を除外して検索
+        hash.query_circle_callback((10, 10), 2.0, None, e1, |e| {
+            found.push(e);
+        });
+        
+        assert_eq!(found.len(), 1);
+        assert!(found.contains(&e2));
+        assert!(!found.contains(&e1));
+    }
+
+    #[test]
+    fn test_spatial_consistency_audit() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = 1u32;
+        hash.insert(e1, (50, 50), 2, 0);
+        
+        // Audit: presence board counts should match entity_info area? 
+        // Not exactly because of overlap, but for a single entity it should.
+        let mask = TestBoard::mask_rect(50-2, 50-2, 5, 5);
+        assert_eq!(hash.presence.count_ones(), mask.count_ones());
+        
+        // Audit: cells should have e1 where presence is true
+        for (x, y) in hash.presence.iter_set_bits() {
+            let idx = TestBoard::tile_to_index(x, y).unwrap();
+            assert!(hash.cells[idx].iter().any(|&(id, _)| id == e1));
+        }
+    }
+
+    #[test]
+    fn test_spatial_out_of_bounds_movement() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = 1u32;
+        
+        // Inside
+        hash.insert(e1, (10, 10), 0, 0);
+        assert!(hash.is_tile_occupied(10, 10));
+        
+        // Move completely outside (negative)
+        hash.update_diff(e1, (-100, -100), 0, 0);
+        assert!(!hash.is_tile_occupied(10, 10));
+        assert!(hash.entity_info.get(&e1).unwrap().center == (-100, -100));
+        assert!(hash.presence.is_empty());
+        
+        // Move partially inside (edge)
+        hash.update_diff(e1, (0, 0), 2, 0); // Covers (-2, -2) to (2, 2)
+        assert!(hash.is_tile_occupied(0, 0));
+        assert!(hash.is_tile_occupied(2, 2));
+    }
+
+    #[test]
+    fn test_spatial_update_kind_change_consistency() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = 1u32;
+        
+        hash.insert(e1, (10, 10), 0, 0); // Kind 0
+        assert!(hash.layer(0).get(10, 10));
+        assert!(!hash.layer(1).get(10, 10));
+        
+        hash.update_diff(e1, (10, 10), 0, 1); // Kind 1
+        assert!(!hash.layer(0).get(10, 10));
+        assert!(hash.layer(1).get(10, 10));
+    }
+
+    #[test]
+    fn test_spatial_multiple_entities_same_kind_removal() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = 1u32;
+        let e2 = 2u32;
+        
+        hash.insert(e1, (10, 10), 0, 0); // Kind 0
+        hash.insert(e2, (10, 10), 0, 0); // Kind 0
+        
+        assert!(hash.layer(0).get(10, 10));
+        
+        hash.remove(e1);
+        assert!(hash.layer(0).get(10, 10), "Bit should remain since e2 is still Kind 0 at this tile");
+        
+        hash.remove(e2);
+        assert!(!hash.layer(0).get(10, 10), "Bit should be cleared now");
+    }
+
+    #[test]
+    fn test_spatial_query_empty_mask() {
+        let mut hash = TestSpatialHash::default();
+        hash.insert(1, (10, 10), 0, 0);
+        
+        let empty_mask = BitBoard::<256, 256>::new();
+        let mut found = Vec::new();
+        hash.query_mask_callback(&empty_mask, None, 99, |e| found.push(e));
+        
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn test_spatial_id_reuse() {
+        let mut hash = TestSpatialHash::default();
+        let e1 = 1u32;
+        
+        hash.insert(e1, (10, 10), 0, 0);
+        hash.remove(e1);
+        
+        hash.insert(e1, (20, 20), 0, 0);
+        assert!(!hash.is_tile_occupied(10, 10));
+        assert!(hash.is_tile_occupied(20, 20));
     }
 }
