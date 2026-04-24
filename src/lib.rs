@@ -1,110 +1,68 @@
 #[cfg(feature = "bevy")]
 use bevy::prelude::*;
-#[cfg(feature = "bevy")]
-use lexaos_bitboard::{BitBoard, BitLayout, RowMajorLayout};
-use std::marker::PhantomData;
 
 pub mod spatial_hash;
+pub mod query_builder;
+
 pub use spatial_hash::SpatialHash;
+pub use query_builder::SpatialQuery;
 
-use lexaos_core::config::SpatialHashInterface;
-
-impl<E, const W: usize, const H: usize, const EK: usize, const SL: usize, L: BitLayout<W, H>> SpatialHashInterface<BitBoard<W, H, L>> for SpatialHash<E, W, H, EK, SL, L> 
-where E: From<Entity> + Into<Entity> + Copy + Eq + std::hash::Hash + Send + Sync + 'static
-{
-    fn static_revision(&self) -> u32 {
-        self.static_revision()
-    }
-
-    fn remove(&mut self, entity: Entity) {
-        self.remove(E::from(entity));
-    }
-
-    fn update_entity(&mut self, entity: Entity, pos: Vec2, radius: f32, kind_idx: usize) {
-        let (tile_x, tile_y) = BitBoard::<W, H, L>::pos_to_tile(pos.x, pos.y);
-        self.update_with_threshold(E::from(entity), (tile_x, tile_y), radius as i32, kind_idx, 1);
-    }
-
-    fn sync_static_layer(&mut self, slot: usize, board: &dyn std::any::Any, revision: u32) {
-        if let Some(board) = board.downcast_ref::<BitBoard<W, H, L>>() {
-            self.full_sync_static_layer(slot, board, revision);
-        }
-    }
-
-    fn mask_visibility(&self, x: i32, y: i32, radius: f32, opaque_layer_idx: usize) -> BitBoard<W, H, L> {
-        self.mask_visibility(x, y, radius, opaque_layer_idx)
-    }
-
-    fn query_filtered_radius_callback(
-        &self,
-        pos: (i32, i32),
-        radius: i32,
-        exclude: Entity,
-        kind_idx: Option<usize>,
-        callback: &mut dyn FnMut(Entity),
-    ) {
-        self.query_filtered_radius_callback(pos, radius, E::from(exclude), kind_idx, &mut |candidate: E| {
-            callback(candidate.into());
-        });
-    }
-
-    fn query_mask_bounded_callback(
-        &self,
-        mask: &BitBoard<W, H, L>,
-        kind_idx: Option<usize>,
-        exclude: Entity,
-        min_tile: (i32, i32),
-        max_tile: (i32, i32),
-        callback: &mut dyn FnMut(Entity),
-    ) {
-        self.query_mask_bounded_callback(mask, kind_idx, E::from(exclude), min_tile, max_tile, &mut |candidate: E| {
-            callback(candidate.into());
-        });
-    }
-}
-
-/// 空間ハッシュで管理されるエンティティへの付与コンポーネント (汎用版)
+/// 空間ハッシュによって管理されるエンティティに付与するコンポーネント
 #[cfg(feature = "bevy")]
-#[derive(Component, Debug, Clone)]
+#[derive(Component, Debug, Clone, Copy, Reflect)]
 pub struct SpatialManaged {
-    /// エンティティの種別インデックス (SpatialHash の E レイヤーに対応)
+    pub radius: f32,
     pub kind_idx: usize,
-    pub radius: i32,
 }
 
-/// 空間ハッシュの同期と管理を行うプラグイン
-pub struct SpatialGridPlugin<C: lexaos_core::config::WorldConfig>(PhantomData<C>);
+/// 空間ハッシュの同期と管理を行う Bevy プラグイン
+#[cfg(feature = "bevy")]
+pub struct SpatialHashPlugin<ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitLayout<W, H>> {
+    _phantom: PhantomData<(ID, L)>,
+}
 
 #[cfg(feature = "bevy")]
-impl<C: lexaos_core::config::WorldConfig> Default for SpatialGridPlugin<C> {
+impl<ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitLayout<W, H>> Default 
+    for SpatialHashPlugin<ID, W, H, E, S, L> 
+{
     fn default() -> Self {
-        Self(PhantomData)
+        Self { _phantom: PhantomData }
     }
 }
 
 #[cfg(feature = "bevy")]
-impl<C: lexaos_core::config::WorldConfig> Plugin for SpatialGridPlugin<C> {
+impl<ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitLayout<W, H>> Plugin 
+    for SpatialHashPlugin<ID, W, H, E, S, L>
+where 
+    ID: From<Entity> + Copy + Eq + Hash + Send + Sync + 'static,
+    L: BitLayout<W, H> + Send + Sync + 'static,
+{
     fn build(&self, app: &mut App) {
-        // SpatialHash is registered via WorldConfig in main.rs, 
-        // or we could initialize it here if not exists.
-        app.add_systems(Update, sync_spatial_hash_system::<C>);
+        app.register_type::<SpatialManaged>()
+           .insert_resource(SpatialHash::<ID, W, H, E, S, L>::default())
+           .add_systems(PostUpdate, spatial_hash_sync_system::<ID, W, H, E, S, L>);
     }
 }
 
-/// Transform の変化を監視し、空間ハッシュの内容を同期 (動的エンティティ)
+/// Transform の変更を空間ハッシュに同期するシステム
 #[cfg(feature = "bevy")]
-fn sync_spatial_hash_system<C: lexaos_core::config::WorldConfig>(
-    mut spatial_hash: ResMut<C::WorldSpatialHash>,
-    query: Query<(Entity, &Transform, &SpatialManaged), Or<(Changed<Transform>, Added<SpatialManaged>)>>,
-    mut removed: RemovedComponents<SpatialManaged>,
-) {
-    // 削除されたエンティティの除去
-    for entity in removed.read() {
-        spatial_hash.remove(entity);
-    }
-
-    // 移動または追加されたエンティティの座標更新
+fn spatial_hash_sync_system<ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitLayout<W, H>>(
+    mut spatial_hash: ResMut<SpatialHash<ID, W, H, E, S, L>>,
+    query: Query<(Entity, &Transform, &SpatialManaged), Changed<Transform>>,
+) where 
+    ID: From<Entity> + Copy + Eq + Hash + Send + Sync + 'static,
+    L: BitLayout<W, H> + Send + Sync + 'static,
+{
     for (entity, transform, managed) in query.iter() {
-        spatial_hash.update_entity(entity, transform.translation.truncate(), managed.radius as f32, managed.kind_idx);
+        let pos = transform.translation.truncate();
+        let tile_pos = L::world_to_tile((pos.x, pos.y));
+        // 位置の更新（閾値1タイルで更新）
+        spatial_hash.update_with_threshold(
+            ID::from(entity), 
+            tile_pos, 
+            managed.radius as i32, 
+            managed.kind_idx, 
+            1
+        );
     }
 }
