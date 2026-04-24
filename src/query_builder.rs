@@ -1,10 +1,17 @@
 use super::spatial_hash::SpatialHash;
-use lexaos_bitboard::{BitLayout, BitBoard};
 use core::hash::Hash;
+use lexaos_bitboard::{BitBoard, BitLayout};
 
 /// 空間ハッシュに対する柔軟な問い合わせを行うためのクエリビルダー
-pub struct SpatialQuery<'a, ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitLayout<W, H>> 
-where
+pub struct SpatialQuery<
+    'a,
+    ID,
+    const W: usize,
+    const H: usize,
+    const E: usize,
+    const S: usize,
+    L: BitLayout<W, H>,
+> where
     ID: Copy + Eq + Hash,
     L: BitLayout<W, H>,
 {
@@ -13,8 +20,8 @@ where
     exclude: Option<ID>,
 }
 
-impl<'a, ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitLayout<W, H>> 
-    SpatialQuery<'a, ID, W, H, E, S, L> 
+impl<'a, ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitLayout<W, H>>
+    SpatialQuery<'a, ID, W, H, E, S, L>
 where
     ID: Copy + Eq + Hash,
     L: BitLayout<W, H>,
@@ -46,34 +53,58 @@ where
     }
 
     /// 円形範囲内のエンティティを走査
-    pub fn circle<F>(&self, center: (i32, i32), radius: f32, mut callback: F) 
-    where 
-        F: FnMut(ID)
+    pub fn circle<F>(&self, center: (i32, i32), radius: f32, mut callback: F)
+    where
+        F: FnMut(ID),
     {
-        self.hash.query_circle_callback(center, radius, self.kind_mask, self.exclude, |id| {
-            callback(id);
-        });
+        self.hash
+            .query_circle_callback(center, radius, self.kind_mask, self.exclude, |id| {
+                callback(id);
+            });
     }
 
     /// 矩形範囲内のエンティティを走査
-    pub fn rect<F>(&self, x: i32, y: i32, width: i32, height: i32, mut callback: F) 
-    where 
-        F: FnMut(ID)
+    pub fn rect<F>(&self, x: i32, y: i32, width: i32, height: i32, mut callback: F)
+    where
+        F: FnMut(ID),
     {
         let mask = BitBoard::<W, H, L>::mask_rect(x, y, width, height);
-        self.hash.query_mask_callback(&mask, self.kind_mask, self.exclude, |id| {
-            callback(id);
-        });
+        self.hash
+            .query_mask_callback(&mask, self.kind_mask, self.exclude, |id| {
+                callback(id);
+            });
     }
 
     /// マスク（BitBoard）範囲内のエンティティを走査
-    pub fn mask<F>(&self, mask: &BitBoard<W, H, L>, mut callback: F) 
-    where 
-        F: FnMut(ID)
+    pub fn mask<F>(&self, mask: &BitBoard<W, H, L>, mut callback: F)
+    where
+        F: FnMut(ID),
     {
-        self.hash.query_mask_callback(mask, self.kind_mask, self.exclude, |id| {
-            callback(id);
-        });
+        self.hash
+            .query_mask_callback(mask, self.kind_mask, self.exclude, |id| {
+                callback(id);
+            });
+    }
+
+    /// 扇形範囲内のエンティティを走査
+    pub fn sector<F>(
+        &self,
+        center: (i32, i32),
+        radius: f32,
+        start_angle: f32,
+        sweep_angle: f32,
+        mut callback: F,
+    ) where
+        F: FnMut(ID),
+    {
+        let args = crate::spatial_hash::SectorArgs {
+            start_angle,
+            sweep_angle,
+        };
+        self.hash
+            .query_sector_callback(center, radius, args, self.kind_mask, self.exclude, |id| {
+                callback(id);
+            });
     }
 }
 
@@ -98,19 +129,25 @@ mod tests {
 
         // 1. 種別フィルタ (Kind 1 のみ)
         let mut found = Vec::new();
-        hash.query().with_kind(1).circle((10, 10), 5.0, |id| found.push(id));
+        hash.query()
+            .with_kind(1)
+            .circle((10, 10), 5.0, |id| found.push(id));
         assert_eq!(found, vec![e2]);
 
         // 2. 複数種別フィルタ (Kind 0 or 2)
         let mut found = Vec::new();
-        hash.query().with_kind_mask((1 << 0) | (1 << 2)).circle((10, 10), 5.0, |id| found.push(id));
+        hash.query()
+            .with_kind_mask((1 << 0) | (1 << 2))
+            .circle((10, 10), 5.0, |id| found.push(id));
         assert!(found.contains(&e1));
         assert!(found.contains(&e3));
         assert!(!found.contains(&e2));
 
         // 3. 除外 (e1 を除外)
         let mut found = Vec::new();
-        hash.query().exclude(e1).circle((10, 10), 5.0, |id| found.push(id));
+        hash.query()
+            .exclude(e1)
+            .circle((10, 10), 5.0, |id| found.push(id));
         assert!(!found.contains(&e1));
         assert!(found.contains(&e2));
         assert!(found.contains(&e3));

@@ -2,6 +2,12 @@ use core::hash::Hash;
 use lexaos_bitboard::{BitBoard, BitLayout};
 use super::SpatialHash;
 
+#[derive(Debug, Clone, Copy)]
+pub struct SectorArgs {
+    pub start_angle: f32,
+    pub sweep_angle: f32,
+}
+
 impl<ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitLayout<W, H>>
     SpatialHash<ID, W, H, E, S, L>
 where
@@ -18,8 +24,8 @@ where
         &self.kind_boards[kind_idx]
     }
 
-    /// 円形範囲内のエンティティを検索 (正確な半径判定)
-    pub fn query_circle_callback<F>(
+    /// 円形範囲内のエンティティを検索
+    pub(crate) fn query_circle_callback<F>(
         &self,
         center: (i32, i32),
         radius: f32,
@@ -44,22 +50,19 @@ where
 
         circle_mask.for_each_overlap(target_board, |_x, _y, idx| {
             for &(e, k) in &self.cells[idx] {
-                if exclude.map_or(true, |ex| e != ex) {
-                    if kind_mask.map_or(true, |mask| (mask >> k) & 1 == 1) {
-                        callback(e);
-                    }
+                if exclude.is_none_or(|ex| e != ex) && kind_mask.is_none_or(|mask| (mask >> k) & 1 == 1) {
+                    callback(e);
                 }
             }
         });
     }
 
-    /// 扇形範囲内のエンティティを検索 (視界コーン等に使用)
-    pub fn query_sector_callback<F>(
+    /// 扇形範囲内のエンティティを検索
+    pub(crate) fn query_sector_callback<F>(
         &self,
         center: (i32, i32),
         radius: f32,
-        start_angle_deg: f32,
-        sweep_angle_deg: f32,
+        args: SectorArgs,
         kind_mask: Option<u64>,
         exclude: Option<ID>,
         mut callback: F,
@@ -70,8 +73,8 @@ where
             center.0,
             center.1,
             radius,
-            start_angle_deg,
-            sweep_angle_deg,
+            args.start_angle,
+            args.sweep_angle,
         );
 
         let target_board = if let Some(mask) = kind_mask {
@@ -87,53 +90,15 @@ where
 
         sector_mask.for_each_overlap(target_board, |_x, _y, idx| {
             for &(e, k) in &self.cells[idx] {
-                if exclude.map_or(true, |ex| e != ex) {
-                    if kind_mask.map_or(true, |mask| (mask >> k) & 1 == 1) {
-                        callback(e);
-                    }
-                }
-            }
-        });
-    }
-
-    /// 矩形（正方形）範囲内のエンティティを検索 (レガシー/互換用)
-    pub fn query_filtered_radius_callback<F>(
-        &self,
-        center: (i32, i32),
-        radius: i32,
-        exclude: Option<ID>,
-        kind_mask: Option<u64>,
-        mut callback: F,
-    ) where
-        F: FnMut(ID),
-    {
-        let target_board = if let Some(mask) = kind_mask {
-            if mask.count_ones() == 1 {
-                let k = mask.trailing_zeros() as usize;
-                if k < E { self.layer(k) } else { &self.presence }
-            } else {
-                &self.presence
-            }
-        } else {
-            &self.presence
-        };
-
-        let min_tile = (center.0 - radius, center.1 - radius);
-        let max_tile = (center.0 + radius, center.1 + radius);
-
-        target_board.for_each_overlap_in(target_board, min_tile, max_tile, |_x, _y, idx| {
-            for &(e, k) in &self.cells[idx] {
-                if exclude.map_or(true, |ex| e != ex) {
-                    if kind_mask.map_or(true, |mask| (mask >> k) & 1 == 1) {
-                        callback(e);
-                    }
+                if exclude.is_none_or(|ex| e != ex) && kind_mask.is_none_or(|mask| (mask >> k) & 1 == 1) {
+                    callback(e);
                 }
             }
         });
     }
 
     /// 任意のマスクと種別（任意）でエンティティを検索
-    pub fn query_mask_callback<F>(
+    pub(crate) fn query_mask_callback<F>(
         &self,
         mask: &BitBoard<W, H, L>,
         kind_mask: Option<u64>,
@@ -155,44 +120,8 @@ where
 
         mask.for_each_overlap(target_board, |_x, _y, idx| {
             for &(e, k) in &self.cells[idx] {
-                if exclude.map_or(true, |ex| e != ex) {
-                    if kind_mask.map_or(true, |mask| (mask >> k) & 1 == 1) {
-                        callback(e);
-                    }
-                }
-            }
-        });
-    }
-
-    /// 任意のマスク、種別（任意）、および範囲制限でエンティティを検索
-    pub fn query_mask_bounded_callback<F>(
-        &self,
-        mask: &BitBoard<W, H, L>,
-        kind_mask: Option<u64>,
-        exclude: Option<ID>,
-        min_tile: (i32, i32),
-        max_tile: (i32, i32),
-        mut callback: F,
-    ) where
-        F: FnMut(ID),
-    {
-        let target_board = if let Some(mask) = kind_mask {
-            if mask.count_ones() == 1 {
-                let k = mask.trailing_zeros() as usize;
-                if k < E { self.layer(k) } else { &self.presence }
-            } else {
-                &self.presence
-            }
-        } else {
-            &self.presence
-        };
-
-        mask.for_each_overlap_in(target_board, min_tile, max_tile, |_x, _y, idx| {
-            for &(e, k) in &self.cells[idx] {
-                if exclude.map_or(true, |ex| e != ex) {
-                    if kind_mask.map_or(true, |mask| (mask >> k) & 1 == 1) {
-                        callback(e);
-                    }
+                if exclude.is_none_or(|ex| e != ex) && kind_mask.is_none_or(|mask| (mask >> k) & 1 == 1) {
+                    callback(e);
                 }
             }
         });

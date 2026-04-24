@@ -9,10 +9,13 @@ use std::marker::PhantomData;
 use bevy::prelude::*;
 
 mod entity;
-mod query;
+pub mod query;
 mod static_layer;
 
 pub(crate) use entity::EntityEntry;
+pub use query::SectorArgs;
+
+type CellStorage<ID> = Box<[SmallVec<[(ID, u8); 4]>]>;
 
 /// タイル座標ベースのエンティティ位置を管理する空間ハッシュ (汎用版)
 /// ID: エンティティを識別する型 (Entity, u32, etc)
@@ -32,7 +35,7 @@ pub struct SpatialHash<
     L: BitLayout<W, H>,
 {
     /// セル管理（y * W + x でアクセス）。(ID, KindIdx) のペアで保持。
-    pub(crate) cells: Box<[SmallVec<[(ID, u8); 4]>]>,
+    pub(crate) cells: CellStorage<ID>,
     /// エンティティの管理情報（履歴保持・削除用）
     pub(crate) entity_info: HashMap<ID, EntityEntry, RandomState>,
     /// 存在判定用のビットマップ
@@ -54,8 +57,8 @@ where
     ID: Copy + Eq + Hash,
 {
     fn default() -> Self {
-        let total_cells = L::total_words() * 64;
-        let cells = vec![SmallVec::new(); total_cells].into_boxed_slice();
+        let total_words = L::total_words();
+        let cells = vec![SmallVec::new(); total_words * 64].into_boxed_slice();
         Self {
             cells,
             entity_info: HashMap::with_hasher(RandomState::default()),
@@ -102,16 +105,17 @@ mod tests {
         hash.insert(e2, (15, 10), 0, 0); // At (15, 10)
 
         let mut found = Vec::new();
-        hash.query_filtered_radius_callback((10, 10), 5, None, None, |e| {
+        // 矩形クエリで代用 (radius 5 = width 11)
+        hash.query().rect(10 - 5, 10 - 5, 11, 11, |e| {
             found.push(e);
         });
 
         assert_eq!(found.len(), 2);
         assert!(found.contains(&e1));
-        assert!(found.contains(&e2)); // Exact distance 5 should be included
+        assert!(found.contains(&e2));
 
         let mut found2 = Vec::new();
-        hash.query_filtered_radius_callback((10, 10), 4, None, None, |e| {
+        hash.query().rect(10 - 4, 10 - 4, 9, 9, |e| {
             found2.push(e);
         });
         assert_eq!(found2.len(), 1);
@@ -149,7 +153,7 @@ mod tests {
         hash.insert(e2, (14, 14), 0, 0); // 距離 sqrt(4^2 + 4^2) = 5.65 (円の外だが正方形の内)
 
         let mut found = Vec::new();
-        hash.query_circle_callback((10, 10), 5.0, None, None, |e| {
+        hash.query().circle((10, 10), 5.0, |e| {
             found.push(e);
         });
 
@@ -172,7 +176,7 @@ mod tests {
 
         let mut found = Vec::new();
         // 右向き 90度の視界 ( -45度 〜 45度 )
-        hash.query_sector_callback((10, 10), 10.0, -45.0, 90.0, None, None, |e| {
+        hash.query().sector((10, 10), 10.0, -45.0, 90.0, |e| {
             found.push(e);
         });
 
@@ -195,7 +199,7 @@ mod tests {
 
         let mut found = Vec::new();
         // マスク内かつ Kind 1 (Enemy) のエンティティを検索
-        hash.query_mask_callback(&proximity_mask, Some(1 << 1), None, |e| {
+        hash.query().with_kind(1).mask(&proximity_mask, |e| {
             found.push(e);
         });
 
@@ -238,8 +242,11 @@ mod tests {
         full_mask = !full_mask;
 
         let mut found = Vec::new();
-        // 範囲を (0,0) ~ (15,15) に限定して検索
-        hash.query_mask_bounded_callback(&full_mask, None, None, (0, 0), (15, 15), |e| {
+        // 範囲を (0,0) ~ (15,15) に限定して検索 (現在は bounded クエリがビルダーにないが、マスクとの積で代用可能)
+        let bounds_mask = BitBoard::<256, 256, RowMajorLayout>::mask_rect(0, 0, 16, 16);
+        let combined_mask = &full_mask & &bounds_mask;
+        
+        hash.query().mask(&combined_mask, |e| {
             found.push(e);
         });
 
@@ -352,7 +359,7 @@ mod tests {
 
         let mut found = Vec::new();
         // e1 を除外して検索
-        hash.query_circle_callback((10, 10), 2.0, None, Some(e1), |e| {
+        hash.query().exclude(e1).circle((10, 10), 2.0, |e| {
             found.push(e);
         });
 
@@ -466,7 +473,7 @@ mod tests {
 
         let empty_mask = BitBoard::<256, 256>::new();
         let mut found = Vec::new();
-        hash.query_mask_callback(&empty_mask, None, None, |e| found.push(e));
+        hash.query().mask(&empty_mask, |e| found.push(e));
 
         assert!(found.is_empty());
     }
