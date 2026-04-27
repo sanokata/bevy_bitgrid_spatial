@@ -1,6 +1,6 @@
+use super::SpatialHash;
 use core::hash::Hash;
 use lexaos_bitboard::{BitBoard, BitLayout};
-use super::SpatialHash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EntityEntry {
@@ -51,27 +51,26 @@ where
         let radius = new_radius;
         let kind_idx = new_kind_idx;
 
-        let old_mask = BitBoard::<W, H, L>::mask_rect(
-            old_center.0 - radius,
-            old_center.1 - radius,
-            radius * 2 + 1,
-            radius * 2 + 1,
-        );
-        let new_mask = BitBoard::<W, H, L>::mask_rect(
-            new_center.0 - radius,
-            new_center.1 - radius,
-            radius * 2 + 1,
-            radius * 2 + 1,
-        );
-
-        let remove_mask = &old_mask & &!&new_mask;
-        for (x, y) in remove_mask.iter_set_bits() {
-            self.cell_remove(x, y, id, kind_idx);
+        // 旧範囲にあって新範囲にないセルを削除
+        for y in (old_center.1 - radius)..=(old_center.1 + radius) {
+            for x in (old_center.0 - radius)..=(old_center.0 + radius) {
+                let in_new = x >= new_center.0 - radius && x <= new_center.0 + radius
+                    && y >= new_center.1 - radius && y <= new_center.1 + radius;
+                if !in_new {
+                    self.cell_remove(x, y, id, kind_idx);
+                }
+            }
         }
 
-        let insert_mask = &new_mask & &!&old_mask;
-        for (x, y) in insert_mask.iter_set_bits() {
-            self.cell_insert(x, y, id, kind_idx);
+        // 新範囲にあって旧範囲にないセルを挿入
+        for y in (new_center.1 - radius)..=(new_center.1 + radius) {
+            for x in (new_center.0 - radius)..=(new_center.0 + radius) {
+                let in_old = x >= old_center.0 - radius && x <= old_center.0 + radius
+                    && y >= old_center.1 - radius && y <= old_center.1 + radius;
+                if !in_old {
+                    self.cell_insert(x, y, id, kind_idx);
+                }
+            }
         }
 
         if let Some(info) = self.entity_info.get_mut(&id) {
@@ -130,13 +129,12 @@ where
     }
 
     pub fn insert(&mut self, id: ID, tile_pos: (i32, i32), radius: i32, kind_idx: usize) {
-        let mut mask = BitBoard::<W, H, L>::default();
-        mask.set(tile_pos.0, tile_pos.1, true);
-        let mask = if radius > 0 {
-            mask.dilate(radius as u32)
-        } else {
-            mask
-        };
+        let mask = BitBoard::<W, H, L>::mask_rect(
+            tile_pos.0 - radius,
+            tile_pos.1 - radius,
+            radius * 2 + 1,
+            radius * 2 + 1,
+        );
 
         self.presence |= &mask;
         *self.layer_mut(kind_idx) |= &mask;
@@ -159,14 +157,12 @@ where
 
     pub fn remove(&mut self, id: ID) {
         if let Some(entry) = self.entity_info.remove(&id) {
-            let mask = BitBoard::<W, H, L>::mask_rect(
-                entry.center.0 - entry.radius,
-                entry.center.1 - entry.radius,
-                entry.radius * 2 + 1,
-                entry.radius * 2 + 1,
-            );
-            for (x, y) in mask.iter_set_bits() {
-                self.cell_remove(x, y, id, entry.kind_idx);
+            let radius = entry.radius;
+            let center = entry.center;
+            for y in (center.1 - radius)..=(center.1 + radius) {
+                for x in (center.0 - radius)..=(center.0 + radius) {
+                    self.cell_remove(x, y, id, entry.kind_idx);
+                }
             }
         }
     }

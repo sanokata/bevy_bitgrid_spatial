@@ -1,6 +1,6 @@
+use super::SpatialHash;
 use core::hash::Hash;
 use lexaos_bitboard::{BitBoard, BitLayout};
-use super::SpatialHash;
 
 impl<ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitLayout<W, H>>
     SpatialHash<ID, W, H, E, S, L>
@@ -46,11 +46,11 @@ where
     ) {
         if layer_idx < S {
             self.static_layers[layer_idx] = board.clone();
-            
+
             // 収縮済みキャッシュの更新 (radius=1, radius=2)
             self.eroded_layers[layer_idx][0] = board.erode(1);
             self.eroded_layers[layer_idx][1] = board.erode(2);
-            
+
             self.static_revision = revision;
         }
     }
@@ -76,7 +76,9 @@ where
 
     /// 指定した静的レイヤー (地形等) の範囲内がすべてセットされているか判定 (通行判定用)
     pub fn is_static_area_all_set(&self, layer_idx: usize, x: i32, y: i32, radius: i32) -> bool {
-        if layer_idx >= S { return false; }
+        if layer_idx >= S {
+            return false;
+        }
         match radius {
             0 => self.static_layers[layer_idx].get(x, y),
             1 => self.eroded_layers[layer_idx][0].get(x, y),
@@ -87,7 +89,9 @@ where
 
     /// 指定した静的レイヤー (地形等) の範囲内に一つでもセットされたビットがあるか判定 (衝突判定用)
     pub fn is_static_area_any_set(&self, layer_idx: usize, x: i32, y: i32, radius: i32) -> bool {
-        if layer_idx >= S { return false; }
+        if layer_idx >= S {
+            return false;
+        }
         self.static_layers[layer_idx].is_area_any_set(x, y, radius)
     }
 }

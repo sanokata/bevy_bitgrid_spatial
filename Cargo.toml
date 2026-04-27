@@ -4,13 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-lexaos_core = { path = "../lexaos_core" }
 lexaos_bitboard = { path = "../lexaos_bitboard" }
-smallvec = "1.11"
-hashbrown = "0.14"
+hashbrown = "0.15"
 ahash = "0.8"
-bevy = { workspace = true, optional = true }
+smallvec = "1.13"
 
 [features]
-default = []
 bevy = ["dep:bevy"]
+
+[dependencies.bevy]
+workspace = true
+optional = true
