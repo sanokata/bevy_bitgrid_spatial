@@ -44,15 +44,21 @@ where
         board: &BitBoard<W, H, L>,
         revision: u32,
     ) {
-        if layer_idx < S {
-            self.static_layers[layer_idx] = board.clone();
-
-            // 収縮済みキャッシュの更新 (radius=1, radius=2)
-            self.eroded_layers[layer_idx][0] = board.erode(1);
-            self.eroded_layers[layer_idx][1] = board.erode(2);
-
-            self.static_revision = revision;
+        if layer_idx >= S {
+            return;
         }
+
+        // 既存バッファを流用してコピー（再アロケートなし）
+        self.static_layers[layer_idx].clone_from(board);
+
+        // 収縮済みキャッシュ (radius=1, radius=2) も同じ buffer を再利用して in-place 更新
+        let mut scratch = BitBoard::<W, H, L>::new();
+        self.eroded_layers[layer_idx][0].clone_from(board);
+        self.eroded_layers[layer_idx][0].erode_with_buffer(1, &mut scratch);
+        self.eroded_layers[layer_idx][1].clone_from(board);
+        self.eroded_layers[layer_idx][1].erode_with_buffer(2, &mut scratch);
+
+        self.static_revision = revision;
     }
 
     /// 特定のタイルの静的レイヤー情報を更新

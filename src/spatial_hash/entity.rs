@@ -9,6 +9,78 @@ pub(crate) struct EntityEntry {
     pub(crate) kind_idx: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Rect {
+    x1: i32,
+    y1: i32,
+    x2: i32,
+    y2: i32,
+}
+
+impl Rect {
+    fn centered(center: (i32, i32), radius: i32) -> Self {
+        Self {
+            x1: center.0 - radius,
+            y1: center.1 - radius,
+            x2: center.0 + radius,
+            y2: center.1 + radius,
+        }
+    }
+}
+
+/// `src` から `other` を引いた矩形差分（src ∖ other）を、最大 4 帯のみで走査して
+/// callback を呼び出す。各セルは1度だけ訪問される。
+fn for_each_rect_diff<F: FnMut(i32, i32)>(src: Rect, other: Rect, mut f: F) {
+    // 交差矩形
+    let ix1 = src.x1.max(other.x1);
+    let ix2 = src.x2.min(other.x2);
+    let iy1 = src.y1.max(other.y1);
+    let iy2 = src.y2.min(other.y2);
+
+    if ix1 > ix2 || iy1 > iy2 {
+        // 重ならない場合は src 全体が差分
+        for y in src.y1..=src.y2 {
+            for x in src.x1..=src.x2 {
+                f(x, y);
+            }
+        }
+        return;
+    }
+
+    // 上帯: y in [src.y1, iy1-1], x in [src.x1, src.x2]
+    if src.y1 < iy1 {
+        for y in src.y1..iy1 {
+            for x in src.x1..=src.x2 {
+                f(x, y);
+            }
+        }
+    }
+    // 下帯: y in [iy2+1, src.y2], x in [src.x1, src.x2]
+    if iy2 < src.y2 {
+        for y in (iy2 + 1)..=src.y2 {
+            for x in src.x1..=src.x2 {
+                f(x, y);
+            }
+        }
+    }
+    // 左帯: x in [src.x1, ix1-1], y in [iy1, iy2]
+    if src.x1 < ix1 {
+        for y in iy1..=iy2 {
+            for x in src.x1..ix1 {
+                f(x, y);
+            }
+        }
+    }
+    // 右帯: x in [ix2+1, src.x2], y in [iy1, iy2]
+    if ix2 < src.x2 {
+        for y in iy1..=iy2 {
+            for x in (ix2 + 1)..=src.x2 {
+                f(x, y);
+            }
+        }
+    }
+}
+
 impl<ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitLayout<W, H>>
     SpatialHash<ID, W, H, E, S, L>
 where
@@ -51,27 +123,18 @@ where
         let radius = new_radius;
         let kind_idx = new_kind_idx;
 
-        // 旧範囲にあって新範囲にないセルを削除
-        for y in (old_center.1 - radius)..=(old_center.1 + radius) {
-            for x in (old_center.0 - radius)..=(old_center.0 + radius) {
-                let in_new = x >= new_center.0 - radius && x <= new_center.0 + radius
-                    && y >= new_center.1 - radius && y <= new_center.1 + radius;
-                if !in_new {
-                    self.cell_remove(x, y, id, kind_idx);
-                }
-            }
-        }
+        let old_rect = Rect::centered(old_center, radius);
+        let new_rect = Rect::centered(new_center, radius);
+
+        // 旧範囲にあって新範囲にないセルを削除（矩形差分の 4 帯のみ走査）
+        for_each_rect_diff(old_rect, new_rect, |x, y| {
+            self.cell_remove(x, y, id, kind_idx);
+        });
 
         // 新範囲にあって旧範囲にないセルを挿入
-        for y in (new_center.1 - radius)..=(new_center.1 + radius) {
-            for x in (new_center.0 - radius)..=(new_center.0 + radius) {
-                let in_old = x >= old_center.0 - radius && x <= old_center.0 + radius
-                    && y >= old_center.1 - radius && y <= old_center.1 + radius;
-                if !in_old {
-                    self.cell_insert(x, y, id, kind_idx);
-                }
-            }
-        }
+        for_each_rect_diff(new_rect, old_rect, |x, y| {
+            self.cell_insert(x, y, id, kind_idx);
+        });
 
         if let Some(info) = self.entity_info.get_mut(&id) {
             info.center = new_center;
