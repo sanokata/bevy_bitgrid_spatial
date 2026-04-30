@@ -494,4 +494,212 @@ mod tests {
         assert!(!hash.is_tile_occupied(10, 10));
         assert!(hash.is_tile_occupied(20, 20));
     }
+
+    // ─── エッジケース: update_diff の各分岐 ─────────────────────────
+
+    #[test]
+    fn update_diff_is_no_op_when_nothing_changed() {
+        let mut h = TestSpatialHash::default();
+        h.insert(1u32, (10, 10), 1, 0);
+        let presence_before = h.presence.count_ones();
+        let cells_before = h.cells[TestBoard::tile_to_index(10, 10).unwrap()].len();
+
+        // center / radius / kind が完全一致 → 何もしない
+        h.update_diff(1u32, (10, 10), 1, 0);
+
+        assert_eq!(h.presence.count_ones(), presence_before);
+        assert_eq!(
+            h.cells[TestBoard::tile_to_index(10, 10).unwrap()].len(),
+            cells_before
+        );
+    }
+
+    #[test]
+    fn update_diff_radius_only_change_goes_through_remove_insert() {
+        let mut h = TestSpatialHash::default();
+        h.insert(1u32, (10, 10), 1, 0);
+        // center 同じ、radius のみ 1 → 2
+        h.update_diff(1u32, (10, 10), 2, 0);
+        // 半径 2 の範囲（5x5）が新たに占有されている
+        assert!(h.is_tile_occupied(8, 8));
+        assert!(h.is_tile_occupied(12, 12));
+        // 古い 3x3 領域内の角は新範囲にも含まれるので true のまま
+        assert!(h.is_tile_occupied(11, 11));
+        let info = h.entity_info.get(&1u32).unwrap();
+        assert_eq!(info.radius, 2);
+    }
+
+    #[test]
+    fn update_diff_kind_only_change_swaps_layer() {
+        let mut h = TestSpatialHash::default();
+        h.insert(1u32, (10, 10), 0, 0); // Kind 0
+        assert!(h.layer(0).get(10, 10));
+        assert!(!h.layer(1).get(10, 10));
+
+        h.update_diff(1u32, (10, 10), 0, 1); // Kind 1 へ変更
+
+        assert!(!h.layer(0).get(10, 10), "旧 kind の bit はクリアされる");
+        assert!(h.layer(1).get(10, 10), "新 kind の bit が立つ");
+        assert_eq!(h.entity_info.get(&1u32).unwrap().kind_idx, 1);
+    }
+
+    #[test]
+    fn update_diff_handles_disjoint_movement() {
+        // 旧範囲と新範囲が完全に離れている場合、for_each_rect_diff の
+        // 「交差なし」分岐を通って old 全削除 + new 全挿入になる
+        let mut h = TestSpatialHash::default();
+        h.insert(1u32, (10, 10), 1, 0);
+        assert!(h.is_tile_occupied(10, 10));
+        assert!(h.is_tile_occupied(11, 11));
+
+        // center のみ動かす（radius/kind 同じ）→ 経路 4 を通る
+        h.update_diff(1u32, (100, 100), 1, 0);
+
+        // 旧範囲は完全に空
+        assert!(!h.is_tile_occupied(10, 10));
+        assert!(!h.is_tile_occupied(11, 11));
+        // 新範囲が占有されている
+        assert!(h.is_tile_occupied(100, 100));
+        assert!(h.is_tile_occupied(101, 101));
+    }
+
+    // ─── エッジケース: insert / remove の境界 ───────────────────────
+
+    #[test]
+    fn insert_overrides_existing_entity_info_but_leaves_stale_cells() {
+        // 同じ ID を 2 回 insert すると entity_info は上書きだが、
+        // cells には旧登録が残る（呼び出し側で remove してから insert すべき）
+        let mut h = TestSpatialHash::default();
+        h.insert(1u32, (10, 10), 0, 0);
+        h.insert(1u32, (20, 20), 0, 0);
+
+        // entity_info は新位置を指す
+        assert_eq!(h.entity_info.get(&1u32).unwrap().center, (20, 20));
+        // 旧 cell には古い登録が残っている（既知の制限）
+        let old_idx = TestBoard::tile_to_index(10, 10).unwrap();
+        assert!(h.cells[old_idx].iter().any(|&(id, _)| id == 1u32));
+    }
+
+    #[test]
+    fn remove_unknown_entity_is_idempotent() {
+        let mut h = TestSpatialHash::default();
+        // 未登録 ID の remove はパニックせず何もしない
+        h.remove(42u32);
+        h.remove(42u32);
+        assert!(h.presence.is_empty());
+    }
+
+    #[test]
+    fn insert_with_negative_radius_is_silent_no_op_for_cells() {
+        // 負の radius を渡すと mask_rect が空マスクを返し、cells は空のまま
+        let mut h = TestSpatialHash::default();
+        h.insert(1u32, (10, 10), -1, 0);
+        // entity_info には登録されるが cells は空
+        assert!(h.entity_info.contains_key(&1u32));
+        assert!(h.presence.is_empty());
+    }
+
+    #[test]
+    fn insert_with_huge_radius_does_not_panic() {
+        // ボード幅以上の半径でも mask_rect 側でクリップされるため動作する
+        let mut h = TestSpatialHash::default();
+        h.insert(1u32, (128, 128), 500, 0);
+        assert!(h.entity_info.contains_key(&1u32));
+        // ボード全域が占有されている（少なくとも中央は確実）
+        assert!(h.is_tile_occupied(128, 128));
+        // remove も問題なく動く
+        h.remove(1u32);
+        assert!(h.presence.is_empty());
+    }
+
+    // ─── エッジケース: クエリビルダー ──────────────────────────────
+
+    #[test]
+    fn query_with_kind_mask_zero_yields_no_results() {
+        let mut h = TestSpatialHash::default();
+        h.insert(1u32, (10, 10), 0, 0);
+        h.insert(2u32, (10, 10), 0, 1);
+
+        // mask=0 はどの kind にも一致しない → 結果は空
+        let mut found = Vec::new();
+        h.query()
+            .with_kind_mask(0)
+            .circle((10, 10), 5.0, |id| found.push(id));
+        assert!(found.is_empty());
+    }
+
+    #[test]
+    fn query_with_kind_repeated_keeps_last_call() {
+        let mut h = TestSpatialHash::default();
+        h.insert(1u32, (10, 10), 0, 0);
+        h.insert(2u32, (10, 10), 0, 1);
+
+        // with_kind を 2 回チェーン → 最後の (1) が有効
+        let mut found = Vec::new();
+        h.query()
+            .with_kind(0)
+            .with_kind(1)
+            .circle((10, 10), 5.0, |id| found.push(id));
+        assert_eq!(found, vec![2u32]);
+    }
+
+    // ─── エッジケース: 静的レイヤーのキャッシュ整合性 ──────────────
+
+    #[test]
+    fn update_static_tile_does_not_refresh_eroded_cache() {
+        // 既知の不変条件: update_static_tile は static_layers のみ更新し、
+        // eroded_layers は古いままになる。半径 1〜2 のキャッシュ済みクエリは
+        // この事実を踏まえて呼び出し側で full_sync を使うべき。
+        let mut h = TestSpatialHash::default();
+        let mut board = BitBoard::<256, 256, RowMajorLayout>::default();
+        // 5x5 の通行可能領域を初期構築
+        for y in 18..=22 {
+            for x in 18..=22 {
+                board.set(x, y, true);
+            }
+        }
+        h.full_sync_static_layer(0, &board, 1);
+        // 半径 1 で all_set のはず
+        assert!(h.is_static_area_all_set(0, 20, 20, 1));
+
+        // 1 タイルだけ穴を空ける（部分更新）
+        h.update_static_tile(0, 20, 20, false, 2);
+        // 直接 layer に問い合わせると false を返すが…
+        assert!(!h.static_layer(0).get(20, 20));
+        // …半径 1 のキャッシュは古い「all set」を返す（既知の制限）
+        assert!(
+            h.is_static_area_all_set(0, 20, 20, 1),
+            "eroded キャッシュは update_static_tile では更新されない"
+        );
+
+        // full_sync 後はキャッシュが追従
+        h.full_sync_static_layer(0, &h.static_layer(0).clone(), 3);
+        assert!(!h.is_static_area_all_set(0, 20, 20, 1));
+    }
+
+    #[test]
+    fn full_sync_with_invalid_layer_idx_is_silent_no_op() {
+        let mut h = TestSpatialHash::default();
+        let board = BitBoard::<256, 256, RowMajorLayout>::default();
+        // S=5 なので layer_idx=10 は無効
+        h.full_sync_static_layer(10, &board, 1);
+        assert_eq!(
+            h.static_revision(),
+            0,
+            "無効 layer_idx ではリビジョンも更新されない"
+        );
+    }
+
+    // ─── エッジケース: ジェネリック ID 型 ──────────────────────────
+
+    #[test]
+    fn spatial_hash_works_with_u64_id() {
+        type U64Hash = SpatialHash<u64, 256, 256, 2, 1>;
+        let mut h = U64Hash::default();
+        let id = 0xDEAD_BEEF_CAFE_BABE_u64;
+        h.insert(id, (10, 10), 0, 0);
+        assert!(h.is_tile_occupied(10, 10));
+        h.remove(id);
+        assert!(!h.is_tile_occupied(10, 10));
+    }
 }
