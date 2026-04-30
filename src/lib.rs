@@ -1,7 +1,10 @@
 #[cfg(feature = "bevy")]
 use bevy::prelude::*;
+#[cfg(feature = "bevy")]
 use lexaos_bitboard::BitLayout;
+#[cfg(feature = "bevy")]
 use std::hash::Hash;
+#[cfg(feature = "bevy")]
 use std::marker::PhantomData;
 
 pub mod query_builder;
