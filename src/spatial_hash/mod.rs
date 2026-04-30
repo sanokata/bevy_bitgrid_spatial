@@ -44,9 +44,13 @@ pub struct SpatialHash<
     pub(crate) kind_boards: [BitBoard<W, H, L>; E],
     /// 静的なレイヤー（地形等）のコピー (Sレイヤー)
     pub(crate) static_layers: [BitBoard<W, H, L>; S],
-    /// 静的なレイヤーの収縮済みキャッシュ [レイヤー][半径0=1, 半径1=2]
+    /// 静的なレイヤーの収縮済みキャッシュ。インデックスは
+    /// `[layer][CACHED_EROSION_RADII の位置]`（static_layer.rs 参照）。
     pub(crate) eroded_layers: [[BitBoard<W, H, L>; 2]; S],
-    /// 静적レイヤーの同期用リビジョン
+    /// 静的レイヤーの変更検知トークン。値そのものに意味はなく、外部（TileMap 等）の
+    /// 単調増加カウンタを `full_sync_static_layer` 経由で受け取り、`!=` 比較で
+    /// 再同期要否を判定する。`u32::wrapping_add` で wrap しても呼び出し側で
+    /// `wrapping_sub > 1000` のような差分判定をすれば大幅な乖離を検出可能。
     pub(crate) static_revision: u32,
     pub(crate) _layout: PhantomData<L>,
 }

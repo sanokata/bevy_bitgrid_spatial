@@ -29,16 +29,39 @@ impl Rect {
 }
 
 /// `src` から `other` を引いた矩形差分（src ∖ other）を、最大 4 帯のみで走査して
-/// callback を呼び出す。各セルは1度だけ訪問される。
+/// callback を呼び出す。各セルは 1 度だけ訪問される。
+///
+/// # 4 帯への分解
+///
+/// 2 つの軸並行矩形 `src` と `other` の差集合は、`src` を以下の 4 つの帯に分割すれば
+/// 重複なく列挙できる（`I` は src ∩ other の交差矩形）:
+///
+/// ```text
+///         src.x1                   src.x2
+///   ┌──────┬───────────────────┬────────┐ src.y1
+///   │      │                   │        │
+///   │      │      上 帯        │        │  ← y in [src.y1, iy1)
+///   │      ├───────────────────┤        │ iy1
+///   │      │                   │        │
+///   │ 左帯 │   I (交差・除外)  │ 右帯   │  ← y in [iy1, iy2]
+///   │      │                   │        │
+///   │      ├───────────────────┤        │ iy2
+///   │      │                   │        │
+///   │      │      下 帯        │        │  ← y in (iy2, src.y2]
+///   └──────┴───────────────────┴────────┘ src.y2
+///        ix1                   ix2
+/// ```
+///
+/// 上帯と下帯は src の全幅を走査し、左帯と右帯は交差行 `[iy1, iy2]` のみを走査する。
+/// 交差が無い（`ix1 > ix2 || iy1 > iy2`）場合は src 全体が差分となる。
 fn for_each_rect_diff<F: FnMut(i32, i32)>(src: Rect, other: Rect, mut f: F) {
-    // 交差矩形
     let ix1 = src.x1.max(other.x1);
     let ix2 = src.x2.min(other.x2);
     let iy1 = src.y1.max(other.y1);
     let iy2 = src.y2.min(other.y2);
 
     if ix1 > ix2 || iy1 > iy2 {
-        // 重ならない場合は src 全体が差分
+        // 交差なし: src 全体が差分
         for y in src.y1..=src.y2 {
             for x in src.x1..=src.x2 {
                 f(x, y);
@@ -47,7 +70,7 @@ fn for_each_rect_diff<F: FnMut(i32, i32)>(src: Rect, other: Rect, mut f: F) {
         return;
     }
 
-    // 上帯: y in [src.y1, iy1-1], x in [src.x1, src.x2]
+    // 上帯
     if src.y1 < iy1 {
         for y in src.y1..iy1 {
             for x in src.x1..=src.x2 {
@@ -55,7 +78,7 @@ fn for_each_rect_diff<F: FnMut(i32, i32)>(src: Rect, other: Rect, mut f: F) {
             }
         }
     }
-    // 下帯: y in [iy2+1, src.y2], x in [src.x1, src.x2]
+    // 下帯
     if iy2 < src.y2 {
         for y in (iy2 + 1)..=src.y2 {
             for x in src.x1..=src.x2 {
@@ -63,7 +86,7 @@ fn for_each_rect_diff<F: FnMut(i32, i32)>(src: Rect, other: Rect, mut f: F) {
             }
         }
     }
-    // 左帯: x in [src.x1, ix1-1], y in [iy1, iy2]
+    // 左帯
     if src.x1 < ix1 {
         for y in iy1..=iy2 {
             for x in src.x1..ix1 {
@@ -71,7 +94,7 @@ fn for_each_rect_diff<F: FnMut(i32, i32)>(src: Rect, other: Rect, mut f: F) {
             }
         }
     }
-    // 右帯: x in [ix2+1, src.x2], y in [iy1, iy2]
+    // 右帯
     if ix2 < src.x2 {
         for y in iy1..=iy2 {
             for x in (ix2 + 1)..=src.x2 {
@@ -93,7 +116,17 @@ where
             .map(|info| (info.center.0, info.center.1, info.radius))
     }
 
-    /// エンティティの各セルへの登録内容を差分更新 (最適化版)
+    /// エンティティの各セルへの登録内容を差分更新する。
+    ///
+    /// 入力に応じて以下の 3 経路のいずれかを通る:
+    /// 1. **未登録 ID**: そのまま `insert` を呼ぶ（新規挿入）
+    /// 2. **center / radius / kind_idx が完全一致**: 即 return（no-op）
+    /// 3. **radius または kind_idx が変化**: 既存登録を `remove` して新規 `insert`
+    /// 4. **center のみ変化**: `for_each_rect_diff` で旧範囲∖新範囲 と 新範囲∖旧範囲 を
+    ///    最小帯のみ走査し、cell_remove / cell_insert を発行
+    ///
+    /// 経路 4 が最も効率的で、典型的な「半径そのまま、向きそのまま、位置だけ動く」
+    /// アクター移動ではここを通る。
     pub fn update_diff(
         &mut self,
         id: ID,
@@ -102,12 +135,14 @@ where
         new_kind_idx: usize,
     ) {
         let old_info = if let Some(info) = self.entity_info.get(&id) {
+            // 経路 2: 完全一致 → 早期 return
             if info.center == new_center
                 && info.radius == new_radius
                 && info.kind_idx == new_kind_idx
             {
                 return;
             }
+            // 経路 3: radius / kind_idx 変化 → remove + insert で安全に再構築
             if info.radius != new_radius || info.kind_idx != new_kind_idx {
                 self.remove(id);
                 self.insert(id, new_center, new_radius, new_kind_idx);
@@ -115,9 +150,12 @@ where
             }
             *info
         } else {
+            // 経路 1: 未登録 → 新規挿入
             self.insert(id, new_center, new_radius, new_kind_idx);
             return;
         };
+
+        // 経路 4: center のみ変化 → 4 帯差分で最小走査
 
         let old_center = old_info.center;
         let radius = new_radius;
@@ -141,7 +179,12 @@ where
         }
     }
 
-    /// しきい値ベースのスロットリング更新
+    /// しきい値ベースのスロットリング更新。
+    ///
+    /// 移動量が小さい場合に SpatialHash の差分更新を抑制する。判定は
+    /// **Chebyshev 距離（軸別の最大ずれ）** を使い、`|dx| < threshold && |dy| < threshold`
+    /// かつ radius / kind_idx に変化がなければ何もしない。境界判定は厳密な不等号で、
+    /// `threshold = 1` なら 1 タイル以上動くまで update_diff が走らない。
     pub fn update_with_threshold(
         &mut self,
         id: ID,

@@ -25,12 +25,24 @@ where
     }
 
     /// kind_mask に基づいて走査対象の BitBoard を選択する。
-    /// 単一種別なら層別ボードを使用し、複数種別または無指定なら presence を使う。
+    ///
+    /// - `kind_mask = None` または複数ビット指定: `presence`（全エンティティ）を返す
+    ///   （per-cell の kind フィルタは呼び出し側 `query_with_mask` 内で実施）
+    /// - `kind_mask = Some(1 << k)` の単一ビット指定: `kind_boards[k]` を返し、
+    ///   不要なエンティティを走査せず済む
+    /// - `k >= E` の場合は `presence` にフォールバックするが、これは想定外入力。
+    ///   debug ビルドでは検出できるよう `debug_assert!` する
     #[inline]
     fn select_target_board(&self, kind_mask: Option<u64>) -> &BitBoard<W, H, L> {
         match kind_mask {
             Some(mask) if mask.count_ones() == 1 => {
                 let k = mask.trailing_zeros() as usize;
+                debug_assert!(
+                    k < E,
+                    "kind_mask points to layer {} but only {} layers exist",
+                    k,
+                    E
+                );
                 if k < E { self.layer(k) } else { &self.presence }
             }
             _ => &self.presence,

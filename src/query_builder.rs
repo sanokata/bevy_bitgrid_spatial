@@ -34,19 +34,26 @@ where
         }
     }
 
-    /// 特定の種別（複数指定可）に絞り込む。bit 0..E が kind_idx 0..E に対応。
+    /// 特定の種別（複数指定可）に絞り込む。bit `k` が kind_idx `k` に対応する。
+    ///
+    /// - `mask = 0` を指定すると「どの種別にも一致しない」になり、結果は常に空。
+    /// - 既に `with_kind` または `with_kind_mask` を呼んでいた場合は **上書き** する
+    ///   （複数の制約を OR で結合したい場合は呼び出し側でマスクを合成すること）。
     pub fn with_kind_mask(mut self, mask: u64) -> Self {
         self.kind_mask = Some(mask);
         self
     }
 
-    /// 特定の単一種別に絞り込む
+    /// 特定の単一種別に絞り込む。
+    ///
+    /// 内部的には `with_kind_mask(1 << kind_idx)` と等価で、複数回呼び出すと
+    /// **最後の呼び出しのみが有効**となる。OR 結合したい場合は `with_kind_mask` を使う。
     pub fn with_kind(mut self, kind_idx: usize) -> Self {
         self.kind_mask = Some(1u64 << kind_idx);
         self
     }
 
-    /// 特定のエンティティを除外する
+    /// 特定のエンティティを除外する。複数回呼び出した場合は最後の呼び出しが有効。
     pub fn exclude(mut self, id: ID) -> Self {
         self.exclude = Some(id);
         self
