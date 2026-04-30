@@ -24,6 +24,42 @@ where
         &self.kind_boards[kind_idx]
     }
 
+    /// kind_mask に基づいて走査対象の BitBoard を選択する。
+    /// 単一種別なら層別ボードを使用し、複数種別または無指定なら presence を使う。
+    #[inline]
+    fn select_target_board(&self, kind_mask: Option<u64>) -> &BitBoard<W, H, L> {
+        match kind_mask {
+            Some(mask) if mask.count_ones() == 1 => {
+                let k = mask.trailing_zeros() as usize;
+                if k < E { self.layer(k) } else { &self.presence }
+            }
+            _ => &self.presence,
+        }
+    }
+
+    /// 与えられた検索マスク（円・扇形・任意形状）でセルを走査し、
+    /// kind_mask と exclude のフィルタを通った ID をすべて callback に渡す。
+    fn query_with_mask<F>(
+        &self,
+        search_mask: &BitBoard<W, H, L>,
+        kind_mask: Option<u64>,
+        exclude: Option<ID>,
+        mut callback: F,
+    ) where
+        F: FnMut(ID),
+    {
+        let target_board = self.select_target_board(kind_mask);
+        search_mask.for_each_overlap(target_board, |_x, _y, idx| {
+            for &(e, k) in &self.cells[idx] {
+                let pass_exclude = exclude.is_none_or(|ex| e != ex);
+                let pass_kind = kind_mask.is_none_or(|mask| (mask >> k) & 1 == 1);
+                if pass_exclude && pass_kind {
+                    callback(e);
+                }
+            }
+        });
+    }
+
     /// 円形範囲内のエンティティを検索
     pub(crate) fn query_circle_callback<F>(
         &self,
@@ -31,30 +67,13 @@ where
         radius: f32,
         kind_mask: Option<u64>,
         exclude: Option<ID>,
-        mut callback: F,
+        callback: F,
     ) where
         F: FnMut(ID),
     {
-        let circle_mask = BitBoard::<W, H, L>::mask_sector(center.0, center.1, radius, 0.0, 360.0);
-
-        let target_board = if let Some(mask) = kind_mask {
-            if mask.count_ones() == 1 {
-                let k = mask.trailing_zeros() as usize;
-                if k < E { self.layer(k) } else { &self.presence }
-            } else {
-                &self.presence
-            }
-        } else {
-            &self.presence
-        };
-
-        circle_mask.for_each_overlap(target_board, |_x, _y, idx| {
-            for &(e, k) in &self.cells[idx] {
-                if exclude.is_none_or(|ex| e != ex) && kind_mask.is_none_or(|mask| (mask >> k) & 1 == 1) {
-                    callback(e);
-                }
-            }
-        });
+        let circle_mask =
+            BitBoard::<W, H, L>::mask_sector(center.0, center.1, radius, 0.0, 360.0);
+        self.query_with_mask(&circle_mask, kind_mask, exclude, callback);
     }
 
     /// 扇形範囲内のエンティティを検索
@@ -65,7 +84,7 @@ where
         args: SectorArgs,
         kind_mask: Option<u64>,
         exclude: Option<ID>,
-        mut callback: F,
+        callback: F,
     ) where
         F: FnMut(ID),
     {
@@ -76,25 +95,7 @@ where
             args.start_angle,
             args.sweep_angle,
         );
-
-        let target_board = if let Some(mask) = kind_mask {
-            if mask.count_ones() == 1 {
-                let k = mask.trailing_zeros() as usize;
-                if k < E { self.layer(k) } else { &self.presence }
-            } else {
-                &self.presence
-            }
-        } else {
-            &self.presence
-        };
-
-        sector_mask.for_each_overlap(target_board, |_x, _y, idx| {
-            for &(e, k) in &self.cells[idx] {
-                if exclude.is_none_or(|ex| e != ex) && kind_mask.is_none_or(|mask| (mask >> k) & 1 == 1) {
-                    callback(e);
-                }
-            }
-        });
+        self.query_with_mask(&sector_mask, kind_mask, exclude, callback);
     }
 
     /// 任意のマスクと種別（任意）でエンティティを検索
@@ -103,28 +104,11 @@ where
         mask: &BitBoard<W, H, L>,
         kind_mask: Option<u64>,
         exclude: Option<ID>,
-        mut callback: F,
+        callback: F,
     ) where
         F: FnMut(ID),
     {
-        let target_board = if let Some(mask) = kind_mask {
-            if mask.count_ones() == 1 {
-                let k = mask.trailing_zeros() as usize;
-                if k < E { self.layer(k) } else { &self.presence }
-            } else {
-                &self.presence
-            }
-        } else {
-            &self.presence
-        };
-
-        mask.for_each_overlap(target_board, |_x, _y, idx| {
-            for &(e, k) in &self.cells[idx] {
-                if exclude.is_none_or(|ex| e != ex) && kind_mask.is_none_or(|mask| (mask >> k) & 1 == 1) {
-                    callback(e);
-                }
-            }
-        });
+        self.query_with_mask(mask, kind_mask, exclude, callback);
     }
 
     pub fn is_tile_occupied(&self, tile_x: i32, tile_y: i32) -> bool {
