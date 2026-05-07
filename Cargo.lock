@@ -537,6 +537,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "bevy_bitgrid_spatial"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "bevy",
+ "bitgrid",
+ "hashbrown 0.15.5",
+ "smallvec",
+]
+
+[[package]]
 name = "bevy_camera"
 version = "0.18.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3103,17 +3114,6 @@ dependencies = [
  "byteorder",
  "ogg",
  "tinyvec",
-]
-
-[[package]]
-name = "lexaos_bitgrid_spatial"
-version = "0.1.0"
-dependencies = [
- "ahash",
- "bevy",
- "bitgrid",
- "hashbrown 0.15.5",
- "smallvec",
 ]
 
 [[package]]

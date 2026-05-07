@@ -13,15 +13,20 @@ pub mod spatial_hash;
 pub use query_builder::SpatialQuery;
 pub use spatial_hash::SpatialHash;
 
-/// 空間ハッシュによって管理されるエンティティに付与するコンポーネント
+/// Component attached to entities that are tracked by the spatial hash.
 #[cfg(feature = "bevy")]
 #[derive(Component, Debug, Clone, Copy, Reflect)]
 pub struct SpatialManaged {
+    /// Radius in tiles used for spatial registration.
     pub radius: f32,
+    /// Entity kind index; determines which `kind_boards` layer this entity belongs to.
     pub kind_idx: usize,
 }
 
-/// 空間ハッシュの同期と管理を行う Bevy プラグイン
+/// Bevy plugin that registers a [`SpatialHash`] as a resource and keeps it in sync.
+///
+/// Inserts a default [`SpatialHash`] resource and schedules
+/// [`spatial_hash_sync_system`] in `PostUpdate`.
 #[cfg(feature = "bevy")]
 pub struct SpatialHashPlugin<ID, const W: usize, const H: usize, const E: usize, const S: usize, L>
 where
@@ -57,8 +62,12 @@ where
     }
 }
 
-/// Transform や SpatialManaged の変更を空間ハッシュに同期し、
-/// 削除されたエンティティを空間ハッシュから除去するシステム。
+/// `PostUpdate` system that keeps the spatial hash in sync with the ECS world.
+///
+/// - Removes entities that lost their [`SpatialManaged`] component (despawned or
+///   explicitly removed).
+/// - Updates moved or reconfigured entities using a 1-tile Chebyshev threshold so
+///   that sub-tile jitter does not trigger unnecessary hash updates every frame.
 #[cfg(feature = "bevy")]
 fn spatial_hash_sync_system<ID, const W: usize, const H: usize, const E: usize, const S: usize, L>(
     mut spatial_hash: ResMut<SpatialHash<ID, W, H, E, S, L>>,
@@ -68,17 +77,17 @@ fn spatial_hash_sync_system<ID, const W: usize, const H: usize, const E: usize, 
     ID: From<Entity> + Copy + Eq + Hash + Send + Sync + 'static,
     L: BitLayout<W, H> + Send + Sync + 'static,
 {
-    // 削除されたエンティティのクリーンアップ
+    // Clean up entities that were despawned or lost SpatialManaged.
     for entity in removed.read() {
         spatial_hash.remove(ID::from(entity));
     }
 
-    // 変更されたエンティティの同期
+    // Sync entities whose Transform or SpatialManaged changed this frame.
     for (entity, transform, managed) in query.iter() {
         let pos = transform.translation.truncate();
         let tile_pos = L::world_to_tile((pos.x, pos.y));
-        
-        // 位置の更新（閾値1タイルで更新）
+
+        // Skip updates smaller than 1 tile (Chebyshev distance).
         spatial_hash.update_with_threshold(
             ID::from(entity),
             tile_pos,

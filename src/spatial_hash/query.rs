@@ -2,6 +2,7 @@ use core::hash::Hash;
 use bitgrid::{BitBoard, BitLayout};
 use super::SpatialHash;
 
+/// Start angle and sweep angle for a sector query.
 #[derive(Debug, Clone, Copy)]
 pub struct SectorArgs {
     pub start_angle: f32,
@@ -13,25 +14,25 @@ impl<ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitL
 where
     ID: Copy + Eq + Hash,
 {
-    /// クエリビルダーを取得
+    /// Returns a query builder for this spatial hash.
     pub fn query(&self) -> crate::query_builder::SpatialQuery<'_, ID, W, H, E, S, L> {
         crate::query_builder::SpatialQuery::new(self)
     }
 
-    /// 指定インデックスのエンティティレイヤーを取得
+    /// Returns the occupancy [`BitBoard`] for the given entity kind index.
     #[inline(always)]
     pub fn layer(&self, kind_idx: usize) -> &BitBoard<W, H, L> {
         &self.kind_boards[kind_idx]
     }
 
-    /// kind_mask に基づいて走査対象の BitBoard を選択する。
+    /// Selects the narrowest [`BitBoard`] to iterate based on `kind_mask`.
     ///
-    /// - `kind_mask = None` または複数ビット指定: `presence`（全エンティティ）を返す
-    ///   （per-cell の kind フィルタは呼び出し側 `query_with_mask` 内で実施）
-    /// - `kind_mask = Some(1 << k)` の単一ビット指定: `kind_boards[k]` を返し、
-    ///   不要なエンティティを走査せず済む
-    /// - `k >= E` の場合は `presence` にフォールバックするが、これは想定外入力。
-    ///   debug ビルドでは検出できるよう `debug_assert!` する
+    /// - `None` or multi-bit mask → returns `presence` (all entities); per-cell kind
+    ///   filtering is then applied inside `query_with_mask`.
+    /// - Single-bit mask `Some(1 << k)` → returns `kind_boards[k]` directly, skipping
+    ///   tiles that contain no entity of that kind.
+    /// - `k >= E` falls back to `presence`; treated as a programming error and caught
+    ///   by `debug_assert!` in debug builds.
     #[inline]
     fn select_target_board(&self, kind_mask: Option<u64>) -> &BitBoard<W, H, L> {
         match kind_mask {
@@ -49,8 +50,8 @@ where
         }
     }
 
-    /// 与えられた検索マスク（円・扇形・任意形状）でセルを走査し、
-    /// kind_mask と exclude のフィルタを通った ID をすべて callback に渡す。
+    /// Core query kernel: iterates all occupied tiles in `search_mask`, then
+    /// applies `kind_mask` and `exclude` filters before invoking `callback`.
     fn query_with_mask<F>(
         &self,
         search_mask: &BitBoard<W, H, L>,
@@ -72,7 +73,7 @@ where
         });
     }
 
-    /// 円形範囲内のエンティティを検索
+    /// Finds entities within a circular area.
     pub(crate) fn query_circle_callback<F>(
         &self,
         center: (i32, i32),
@@ -88,7 +89,7 @@ where
         self.query_with_mask(&circle_mask, kind_mask, exclude, callback);
     }
 
-    /// 扇形範囲内のエンティティを検索
+    /// Finds entities within a sector (cone).
     pub(crate) fn query_sector_callback<F>(
         &self,
         center: (i32, i32),
@@ -110,7 +111,7 @@ where
         self.query_with_mask(&sector_mask, kind_mask, exclude, callback);
     }
 
-    /// 任意のマスクと種別（任意）でエンティティを検索
+    /// Finds entities within an arbitrary [`BitBoard`] mask, with optional kind filtering.
     pub(crate) fn query_mask_callback<F>(
         &self,
         mask: &BitBoard<W, H, L>,
@@ -123,6 +124,9 @@ where
         self.query_with_mask(mask, kind_mask, exclude, callback);
     }
 
+    /// Returns `true` if any entity occupies the given tile.
+    ///
+    /// Returns `false` for out-of-bounds coordinates.
     pub fn is_tile_occupied(&self, tile_x: i32, tile_y: i32) -> bool {
         if tile_x < 0 || tile_y < 0 || tile_x >= (W as i32) || tile_y >= (H as i32) {
             return false;

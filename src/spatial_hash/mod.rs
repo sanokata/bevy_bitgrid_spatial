@@ -15,13 +15,16 @@ mod static_layer;
 pub(crate) use entity::EntityEntry;
 pub use query::SectorArgs;
 
+/// Per-cell entity list. Each entry stores the entity ID and its kind index.
 type CellStorage<ID> = Box<[SmallVec<[(ID, u8); 4]>]>;
 
-/// タイル座標ベースのエンティティ位置を管理する空間ハッシュ (汎用版)
-/// ID: エンティティを識別する型 (Entity, u32, etc)
-/// const E: エンティティ種別の数 (Dynamic layers)
-/// const S: 静的レイヤーの数 (Static layers like Terrain)
-/// L: メモリレイアウト
+/// Tile-based spatial hash for tracking entity positions on a fixed-size grid.
+///
+/// - `ID`  — entity identifier type (e.g. `Entity`, `u32`)
+/// - `W`, `H` — grid width and height in tiles
+/// - `E`  — number of dynamic entity kind layers
+/// - `S`  — number of static layers (e.g. terrain or collision maps)
+/// - `L`  — memory layout for the underlying [`BitBoard`]s (default: [`RowMajorLayout`])
 #[cfg_attr(feature = "bevy", derive(Resource))]
 pub struct SpatialHash<
     ID,
@@ -34,23 +37,23 @@ pub struct SpatialHash<
     ID: Copy + Eq + Hash,
     L: BitLayout<W, H>,
 {
-    /// セル管理（y * W + x でアクセス）。(ID, KindIdx) のペアで保持。
+    /// Per-tile entity lists, indexed by `tile_to_index(x, y)`.
+    /// Each entry is `(ID, kind_idx as u8)`.
     pub(crate) cells: CellStorage<ID>,
-    /// エンティティの管理情報（履歴保持・削除用）
+    /// Per-entity metadata used for differential updates and removal.
     pub(crate) entity_info: HashMap<ID, EntityEntry, RandomState>,
-    /// 存在判定用のビットマップ
+    /// Aggregate occupancy bitmap: a bit is set if any entity occupies that tile.
     pub(crate) presence: BitBoard<W, H, L>,
-    /// 種別ごとの高速存在判定ビットマップ (Eレイヤー)
+    /// Per-kind occupancy bitmaps (`E` layers); a bit is set if any entity of that
+    /// kind occupies the tile.
     pub(crate) kind_boards: [BitBoard<W, H, L>; E],
-    /// 静的なレイヤー（地形等）のコピー (Sレイヤー)
+    /// Static layer bitmaps (`S` layers), e.g. terrain or collision maps.
     pub(crate) static_layers: [BitBoard<W, H, L>; S],
-    /// 静的なレイヤーの収縮済みキャッシュ。インデックスは
-    /// `[layer][CACHED_EROSION_RADII の位置]`（static_layer.rs 参照）。
+    /// Pre-eroded caches for fast `is_static_area_all_set` queries at small radii.
+    /// Indexed as `[layer][cache_slot]`; see `CACHED_EROSION_RADII` in `static_layer.rs`.
     pub(crate) eroded_layers: [[BitBoard<W, H, L>; 2]; S],
-    /// 静的レイヤーの変更検知トークン。値そのものに意味はなく、外部（TileMap 等）の
-    /// 単調増加カウンタを `full_sync_static_layer` 経由で受け取り、`!=` 比較で
-    /// 再同期要否を判定する。`u32::wrapping_add` で wrap しても呼び出し側で
-    /// `wrapping_sub > 1000` のような差分判定をすれば大幅な乖離を検出可能。
+    /// Change-detection token propagated from the authoritative tile-map revision counter.
+    /// Only used for `!=` comparisons; the absolute value has no meaning.
     pub(crate) static_revision: u32,
     pub(crate) _layout: PhantomData<L>,
 }
@@ -80,7 +83,7 @@ where
 mod tests {
     use super::*;
 
-    // テスト用にダミーのIDとして u32 を使用
+    // Use u32 as the entity ID type for tests.
     type TestSpatialHash = SpatialHash<u32, 256, 256, 2, 5>;
     type TestBoard = BitBoard<256, 256>;
 
@@ -109,7 +112,7 @@ mod tests {
         hash.insert(e2, (15, 10), 0, 0); // At (15, 10)
 
         let mut found = Vec::new();
-        // 矩形クエリで代用 (radius 5 = width 11)
+        // Use rect query as substitute; radius 5 corresponds to an 11-tile-wide square.
         hash.query().rect(10 - 5, 10 - 5, 11, 11, |e| {
             found.push(e);
         });
@@ -152,9 +155,9 @@ mod tests {
         let e1 = 1u32;
         let e2 = 2u32;
 
-        // (10, 10) から距離 5 の位置に配置
-        hash.insert(e1, (10, 15), 0, 0); // 距離 5.0 (ちょうど)
-        hash.insert(e2, (14, 14), 0, 0); // 距離 sqrt(4^2 + 4^2) = 5.65 (円の外だが正方形の内)
+        // Placed at exactly 5 tiles and ~5.65 tiles from center (10, 10).
+        hash.insert(e1, (10, 15), 0, 0); // distance 5.0 (on the boundary)
+        hash.insert(e2, (14, 14), 0, 0); // sqrt(4^2 + 4^2) ≈ 5.65 — outside circle, inside bounding square
 
         let mut found = Vec::new();
         hash.query().circle((10, 10), 5.0, |e| {
@@ -174,12 +177,12 @@ mod tests {
         let e1 = 1u32;
         let e2 = 2u32;
 
-        // (10, 10) から右方向に e1, 左方向に e2
-        hash.insert(e1, (15, 10), 0, 0); // 右 (0度)
-        hash.insert(e2, (5, 10), 0, 0); // 左 (180度)
+        // e1 directly right (0°), e2 directly left (180°) from (10, 10).
+        hash.insert(e1, (15, 10), 0, 0); // right (0°)
+        hash.insert(e2, (5, 10), 0, 0);  // left (180°)
 
         let mut found = Vec::new();
-        // 右向き 90度の視界 ( -45度 〜 45度 )
+        // 90° forward cone facing right (-45° to +45°).
         hash.query().sector((10, 10), 10.0, -45.0, 90.0, |e| {
             found.push(e);
         });
@@ -194,15 +197,15 @@ mod tests {
         let ally = 1u32;
         let enemy = 2u32;
 
-        // 味方を (10, 10) に、敵を (12, 12) に配置
+        // Ally at (10, 10), enemy at (12, 12).
         hash.insert(ally, (10, 10), 0, 0); // Kind 0: Ally
         hash.insert(enemy, (12, 12), 0, 1); // Kind 1: Enemy
 
-        // 味方レイヤーを 3マス膨張させて「味方の周囲」マスクを作成
+        // Dilate the ally layer by 3 tiles to build a "near ally" mask.
         let proximity_mask = hash.layer(0).dilate(3);
 
         let mut found = Vec::new();
-        // マスク内かつ Kind 1 (Enemy) のエンティティを検索
+        // Search for Kind 1 (Enemy) entities within that mask.
         hash.query().with_kind(1).mask(&proximity_mask, |e| {
             found.push(e);
         });
@@ -216,20 +219,20 @@ mod tests {
         let mut hash = TestSpatialHash::default();
         let e1 = 1u32;
 
-        // 初期配置
+        // Initial placement.
         hash.insert(e1, (10, 10), 1, 0);
         assert!(hash.is_tile_occupied(10, 10));
         assert!(hash.is_tile_occupied(11, 11));
 
-        // 移動と半径変更
+        // Move to (20, 20) and shrink radius to 0.
         hash.update_diff(e1, (20, 20), 0, 0);
 
-        // 古い場所は消えているはず
+        // Old position should be empty.
         assert!(!hash.is_tile_occupied(10, 10));
         assert!(!hash.is_tile_occupied(11, 11));
-        // 新しい場所が占有されている
+        // New position should be occupied.
         assert!(hash.is_tile_occupied(20, 20));
-        assert!(!hash.is_tile_occupied(21, 21)); // 半径0なので
+        assert!(!hash.is_tile_occupied(21, 21)); // radius 0: only center tile
     }
 
     #[test]
@@ -241,15 +244,14 @@ mod tests {
         hash.insert(e1, (10, 10), 0, 0);
         hash.insert(e2, (20, 20), 0, 0);
 
-        // 画面全体を覆うマスクを作成
+        // Create a full-grid mask, then restrict to (0,0)–(15,15) via AND.
         let mut full_mask = BitBoard::<256, 256, RowMajorLayout>::default();
         full_mask = !full_mask;
 
-        let mut found = Vec::new();
-        // 範囲を (0,0) ~ (15,15) に限定して検索 (現在は bounded クエリがビルダーにないが、マスクとの積で代用可能)
         let bounds_mask = BitBoard::<256, 256, RowMajorLayout>::mask_rect(0, 0, 16, 16);
         let combined_mask = &full_mask & &bounds_mask;
-        
+
+        let mut found = Vec::new();
         hash.query().mask(&combined_mask, |e| {
             found.push(e);
         });
@@ -278,13 +280,13 @@ mod tests {
 
         hash.insert(e1, (10, 10), 0, 0);
 
-        // しきい値 5。距離 2 の移動ならスキップされるはず
+        // Threshold 5; a 2-tile move should be suppressed.
         hash.update_with_threshold(e1, (12, 10), 0, 0, 5);
 
         let info = hash.entity_info.get(&e1).unwrap();
         assert_eq!(info.center, (10, 10), "Update should be throttled");
 
-        // 距離 6 の移動なら更新されるはず
+        // A 6-tile move exceeds the threshold; update should proceed.
         hash.update_with_threshold(e1, (16, 10), 0, 0, 5);
         let info2 = hash.entity_info.get(&e1).unwrap();
         assert_eq!(info2.center, (16, 10), "Update should be applied");
@@ -293,17 +295,17 @@ mod tests {
     #[test]
     fn test_spatial_mask_visibility() {
         let mut hash = TestSpatialHash::default();
-        // 5x5 の位置に壁を設置 (静的レイヤー 0)
+        // Place a wall tile at (12, 10) in static layer 0.
         let mut wall_map = BitBoard::<256, 256, RowMajorLayout>::default();
         wall_map.set(12, 10, true);
         hash.full_sync_static_layer(0, &wall_map, 1);
 
-        // (10, 10) から半径 5 で視界を計算
-        // (12, 10) の壁の向こう側 (14, 10) は見えないはず
+        // Compute visibility from (10, 10) with radius 5.
+        // (14, 10) lies behind the wall at (12, 10) and should be invisible.
         let vis = hash.mask_visibility(10, 10, 5.0, 0);
 
         assert!(vis.get(11, 10));
-        assert!(vis.get(12, 10)); // 壁自体は見えている
+        assert!(vis.get(12, 10)); // the wall tile itself is visible
         assert!(
             !vis.get(14, 10),
             "Shadowcasting should work through SpatialHash wrapper"
@@ -343,7 +345,7 @@ mod tests {
 
         hash.insert(e1, (10, 10), 1, 0);
 
-        // 移動 + 半径変更 + 種別変更
+        // Move + radius change + kind change in one update_diff call.
         hash.update_diff(e1, (20, 20), 0, 1);
 
         assert!(!hash.is_tile_occupied(10, 10));
@@ -362,7 +364,7 @@ mod tests {
         hash.insert(e2, (11, 10), 0, 0);
 
         let mut found = Vec::new();
-        // e1 を除外して検索
+        // Search within radius 2, excluding e1.
         hash.query().exclude(e1).circle((10, 10), 2.0, |e| {
             found.push(e);
         });
@@ -376,23 +378,23 @@ mod tests {
     fn test_static_area_queries() {
         let mut sh = TestSpatialHash::default();
         let mut board = BitBoard::<256, 256, RowMajorLayout>::default();
-        
-        // (20, 20) を中心に 5x5 (radius=2) をセット
+
+        // Set a 5×5 block centered at (20, 20) (radius=2).
         for y in 18..=22 {
             for x in 18..=22 {
                 board.set(x, y, true);
             }
         }
-        
-        // 静的レイヤー 0 に同期
+
+        // Sync to static layer 0.
         sh.full_sync_static_layer(0, &board, 1);
-        
-        // 判定
+
+        // All tiles within radius 1 and 2 should be set; radius 3 extends beyond the block.
         assert!(sh.is_static_area_all_set(0, 20, 20, 2));
         assert!(sh.is_static_area_all_set(0, 20, 20, 1));
         assert!(sh.is_static_area_any_set(0, 20, 20, 3));
-        
-        // 一部削除して再判定
+
+        // Remove one tile and re-check.
         board.set(18, 18, false);
         sh.full_sync_static_layer(0, &board, 2);
         assert!(!sh.is_static_area_all_set(0, 20, 20, 2));
@@ -495,7 +497,7 @@ mod tests {
         assert!(hash.is_tile_occupied(20, 20));
     }
 
-    // ─── エッジケース: update_diff の各分岐 ─────────────────────────
+    // ─── Edge cases: update_diff branch coverage ──────────────────────────
 
     #[test]
     fn update_diff_is_no_op_when_nothing_changed() {
@@ -504,7 +506,7 @@ mod tests {
         let presence_before = h.presence.count_ones();
         let cells_before = h.cells[TestBoard::tile_to_index(10, 10).unwrap()].len();
 
-        // center / radius / kind が完全一致 → 何もしない
+        // center, radius, and kind are all identical — must be a no-op.
         h.update_diff(1u32, (10, 10), 1, 0);
 
         assert_eq!(h.presence.count_ones(), presence_before);
@@ -518,12 +520,12 @@ mod tests {
     fn update_diff_radius_only_change_goes_through_remove_insert() {
         let mut h = TestSpatialHash::default();
         h.insert(1u32, (10, 10), 1, 0);
-        // center 同じ、radius のみ 1 → 2
+        // Same center, radius changes from 1 to 2.
         h.update_diff(1u32, (10, 10), 2, 0);
-        // 半径 2 の範囲（5x5）が新たに占有されている
+        // The 5×5 area (radius 2) should now be occupied.
         assert!(h.is_tile_occupied(8, 8));
         assert!(h.is_tile_occupied(12, 12));
-        // 古い 3x3 領域内の角は新範囲にも含まれるので true のまま
+        // Old 3×3 corners are still inside the new 5×5 region.
         assert!(h.is_tile_occupied(11, 11));
         let info = h.entity_info.get(&1u32).unwrap();
         assert_eq!(info.radius, 2);
@@ -536,46 +538,46 @@ mod tests {
         assert!(h.layer(0).get(10, 10));
         assert!(!h.layer(1).get(10, 10));
 
-        h.update_diff(1u32, (10, 10), 0, 1); // Kind 1 へ変更
+        h.update_diff(1u32, (10, 10), 0, 1); // Change to Kind 1
 
-        assert!(!h.layer(0).get(10, 10), "旧 kind の bit はクリアされる");
-        assert!(h.layer(1).get(10, 10), "新 kind の bit が立つ");
+        assert!(!h.layer(0).get(10, 10), "old kind bit should be cleared");
+        assert!(h.layer(1).get(10, 10), "new kind bit should be set");
         assert_eq!(h.entity_info.get(&1u32).unwrap().kind_idx, 1);
     }
 
     #[test]
     fn update_diff_handles_disjoint_movement() {
-        // 旧範囲と新範囲が完全に離れている場合、for_each_rect_diff の
-        // 「交差なし」分岐を通って old 全削除 + new 全挿入になる
+        // Old and new regions are fully disjoint, exercising the "no overlap"
+        // branch of for_each_rect_diff (full old-remove + full new-insert).
         let mut h = TestSpatialHash::default();
         h.insert(1u32, (10, 10), 1, 0);
         assert!(h.is_tile_occupied(10, 10));
         assert!(h.is_tile_occupied(11, 11));
 
-        // center のみ動かす（radius/kind 同じ）→ 経路 4 を通る
+        // Only center moves (radius/kind unchanged) — takes path 4.
         h.update_diff(1u32, (100, 100), 1, 0);
 
-        // 旧範囲は完全に空
+        // Old region should be fully vacated.
         assert!(!h.is_tile_occupied(10, 10));
         assert!(!h.is_tile_occupied(11, 11));
-        // 新範囲が占有されている
+        // New region should be occupied.
         assert!(h.is_tile_occupied(100, 100));
         assert!(h.is_tile_occupied(101, 101));
     }
 
-    // ─── エッジケース: insert / remove の境界 ───────────────────────
+    // ─── Edge cases: insert / remove boundary behavior ───────────────────
 
     #[test]
     fn insert_overrides_existing_entity_info_but_leaves_stale_cells() {
-        // 同じ ID を 2 回 insert すると entity_info は上書きだが、
-        // cells には旧登録が残る（呼び出し側で remove してから insert すべき）
+        // Inserting the same ID twice overwrites entity_info but leaves stale cell
+        // entries; callers should call remove before re-inserting.
         let mut h = TestSpatialHash::default();
         h.insert(1u32, (10, 10), 0, 0);
         h.insert(1u32, (20, 20), 0, 0);
 
-        // entity_info は新位置を指す
+        // entity_info reflects the new position.
         assert_eq!(h.entity_info.get(&1u32).unwrap().center, (20, 20));
-        // 旧 cell には古い登録が残っている（既知の制限）
+        // Old cell still has the stale registration (known limitation).
         let old_idx = TestBoard::tile_to_index(10, 10).unwrap();
         assert!(h.cells[old_idx].iter().any(|&(id, _)| id == 1u32));
     }
@@ -583,7 +585,7 @@ mod tests {
     #[test]
     fn remove_unknown_entity_is_idempotent() {
         let mut h = TestSpatialHash::default();
-        // 未登録 ID の remove はパニックせず何もしない
+        // Removing an unregistered ID must not panic and must be a no-op.
         h.remove(42u32);
         h.remove(42u32);
         assert!(h.presence.is_empty());
@@ -591,28 +593,28 @@ mod tests {
 
     #[test]
     fn insert_with_negative_radius_is_silent_no_op_for_cells() {
-        // 負の radius を渡すと mask_rect が空マスクを返し、cells は空のまま
+        // Negative radius: mask_rect returns an empty mask, so cells are unaffected.
         let mut h = TestSpatialHash::default();
         h.insert(1u32, (10, 10), -1, 0);
-        // entity_info には登録されるが cells は空
+        // entity_info is registered but the presence bitmap stays empty.
         assert!(h.entity_info.contains_key(&1u32));
         assert!(h.presence.is_empty());
     }
 
     #[test]
     fn insert_with_huge_radius_does_not_panic() {
-        // ボード幅以上の半径でも mask_rect 側でクリップされるため動作する
+        // A radius larger than the board is clipped by mask_rect and must not panic.
         let mut h = TestSpatialHash::default();
         h.insert(1u32, (128, 128), 500, 0);
         assert!(h.entity_info.contains_key(&1u32));
-        // ボード全域が占有されている（少なくとも中央は確実）
+        // At minimum the center tile should be occupied.
         assert!(h.is_tile_occupied(128, 128));
-        // remove も問題なく動く
+        // remove should also work cleanly.
         h.remove(1u32);
         assert!(h.presence.is_empty());
     }
 
-    // ─── エッジケース: クエリビルダー ──────────────────────────────
+    // ─── Edge cases: query builder ───────────────────────────────────────
 
     #[test]
     fn query_with_kind_mask_zero_yields_no_results() {
@@ -620,7 +622,7 @@ mod tests {
         h.insert(1u32, (10, 10), 0, 0);
         h.insert(2u32, (10, 10), 0, 1);
 
-        // mask=0 はどの kind にも一致しない → 結果は空
+        // mask=0 matches no kind — result must be empty.
         let mut found = Vec::new();
         h.query()
             .with_kind_mask(0)
@@ -634,7 +636,7 @@ mod tests {
         h.insert(1u32, (10, 10), 0, 0);
         h.insert(2u32, (10, 10), 0, 1);
 
-        // with_kind を 2 回チェーン → 最後の (1) が有効
+        // Chaining with_kind twice keeps only the last call (kind 1).
         let mut found = Vec::new();
         h.query()
             .with_kind(0)
@@ -643,36 +645,35 @@ mod tests {
         assert_eq!(found, vec![2u32]);
     }
 
-    // ─── エッジケース: 静的レイヤーのキャッシュ整合性 ──────────────
+    // ─── Edge cases: static layer cache consistency ───────────────────────
 
     #[test]
     fn update_static_tile_does_not_refresh_eroded_cache() {
-        // 既知の不変条件: update_static_tile は static_layers のみ更新し、
-        // eroded_layers は古いままになる。半径 1〜2 のキャッシュ済みクエリは
-        // この事実を踏まえて呼び出し側で full_sync を使うべき。
+        // Known invariant: update_static_tile only updates static_layers; eroded_layers
+        // remain stale until full_sync_static_layer is called.
         let mut h = TestSpatialHash::default();
         let mut board = BitBoard::<256, 256, RowMajorLayout>::default();
-        // 5x5 の通行可能領域を初期構築
+        // Build a 5×5 passable region.
         for y in 18..=22 {
             for x in 18..=22 {
                 board.set(x, y, true);
             }
         }
         h.full_sync_static_layer(0, &board, 1);
-        // 半径 1 で all_set のはず
+        // All tiles within radius 1 of (20, 20) should be set.
         assert!(h.is_static_area_all_set(0, 20, 20, 1));
 
-        // 1 タイルだけ穴を空ける（部分更新）
+        // Punch a single hole via partial update.
         h.update_static_tile(0, 20, 20, false, 2);
-        // 直接 layer に問い合わせると false を返すが…
+        // The raw layer sees the change...
         assert!(!h.static_layer(0).get(20, 20));
-        // …半径 1 のキャッシュは古い「all set」を返す（既知の制限）
+        // ...but the eroded cache still reflects the old state (known limitation).
         assert!(
             h.is_static_area_all_set(0, 20, 20, 1),
-            "eroded キャッシュは update_static_tile では更新されない"
+            "eroded cache is not refreshed by update_static_tile"
         );
 
-        // full_sync 後はキャッシュが追従
+        // After full_sync, the cache is up to date.
         h.full_sync_static_layer(0, &h.static_layer(0).clone(), 3);
         assert!(!h.is_static_area_all_set(0, 20, 20, 1));
     }
@@ -681,16 +682,16 @@ mod tests {
     fn full_sync_with_invalid_layer_idx_is_silent_no_op() {
         let mut h = TestSpatialHash::default();
         let board = BitBoard::<256, 256, RowMajorLayout>::default();
-        // S=5 なので layer_idx=10 は無効
+        // S=5, so layer_idx=10 is out of range — must be silently ignored.
         h.full_sync_static_layer(10, &board, 1);
         assert_eq!(
             h.static_revision(),
             0,
-            "無効 layer_idx ではリビジョンも更新されない"
+            "invalid layer_idx must not update the revision"
         );
     }
 
-    // ─── エッジケース: ジェネリック ID 型 ──────────────────────────
+    // ─── Edge cases: generic ID type ────────────────────────────────────
 
     #[test]
     fn spatial_hash_works_with_u64_id() {

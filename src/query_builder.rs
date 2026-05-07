@@ -2,7 +2,10 @@ use super::spatial_hash::SpatialHash;
 use core::hash::Hash;
 use bitgrid::{BitBoard, BitLayout};
 
-/// 空間ハッシュに対する柔軟な問い合わせを行うためのクエリビルダー
+/// Builder for flexible spatial hash queries.
+///
+/// Obtained via [`SpatialHash::query`]. Chain filter methods then call a shape
+/// method (`circle`, `rect`, `mask`, `sector`) to iterate matching entities.
 pub struct SpatialQuery<
     'a,
     ID,
@@ -16,7 +19,9 @@ pub struct SpatialQuery<
     L: BitLayout<W, H>,
 {
     hash: &'a SpatialHash<ID, W, H, E, S, L>,
+    /// Bitmask of accepted kind indices; `None` accepts all kinds.
     kind_mask: Option<u64>,
+    /// Entity to exclude from results.
     exclude: Option<ID>,
 }
 
@@ -26,6 +31,7 @@ where
     ID: Copy + Eq + Hash,
     L: BitLayout<W, H>,
 {
+    /// Creates a new query builder with no filters applied.
     pub fn new(hash: &'a SpatialHash<ID, W, H, E, S, L>) -> Self {
         Self {
             hash,
@@ -34,32 +40,34 @@ where
         }
     }
 
-    /// 特定の種別（複数指定可）に絞り込む。bit `k` が kind_idx `k` に対応する。
+    /// Filter results to entities whose `kind_idx` has the corresponding bit set in `mask`.
     ///
-    /// - `mask = 0` を指定すると「どの種別にも一致しない」になり、結果は常に空。
-    /// - 既に `with_kind` または `with_kind_mask` を呼んでいた場合は **上書き** する
-    ///   （複数の制約を OR で結合したい場合は呼び出し側でマスクを合成すること）。
+    /// Bit `k` selects `kind_idx == k`. Multiple bits yield OR semantics.
+    /// `mask = 0` matches nothing and always yields an empty result.
+    /// Calling this (or [`with_kind`](Self::with_kind)) multiple times **overwrites** the
+    /// previous value; combine masks on the caller side for OR logic across calls.
     pub fn with_kind_mask(mut self, mask: u64) -> Self {
         self.kind_mask = Some(mask);
         self
     }
 
-    /// 特定の単一種別に絞り込む。
+    /// Filter results to a single entity kind.
     ///
-    /// 内部的には `with_kind_mask(1 << kind_idx)` と等価で、複数回呼び出すと
-    /// **最後の呼び出しのみが有効**となる。OR 結合したい場合は `with_kind_mask` を使う。
+    /// Equivalent to `with_kind_mask(1 << kind_idx)`. If called multiple times, only the
+    /// **last** call takes effect. Use [`with_kind_mask`](Self::with_kind_mask) to select
+    /// multiple kinds in one call.
     pub fn with_kind(mut self, kind_idx: usize) -> Self {
         self.kind_mask = Some(1u64 << kind_idx);
         self
     }
 
-    /// 特定のエンティティを除外する。複数回呼び出した場合は最後の呼び出しが有効。
+    /// Exclude a specific entity from results. Only the last call takes effect.
     pub fn exclude(mut self, id: ID) -> Self {
         self.exclude = Some(id);
         self
     }
 
-    /// 円形範囲内のエンティティを走査
+    /// Iterate entities within a circular area.
     pub fn circle<F>(&self, center: (i32, i32), radius: f32, mut callback: F)
     where
         F: FnMut(ID),
@@ -70,7 +78,7 @@ where
             });
     }
 
-    /// 矩形範囲内のエンティティを走査
+    /// Iterate entities within a rectangular area.
     pub fn rect<F>(&self, x: i32, y: i32, width: i32, height: i32, mut callback: F)
     where
         F: FnMut(ID),
@@ -82,7 +90,7 @@ where
             });
     }
 
-    /// マスク（BitBoard）範囲内のエンティティを走査
+    /// Iterate entities within an arbitrary [`BitBoard`] mask.
     pub fn mask<F>(&self, mask: &BitBoard<W, H, L>, mut callback: F)
     where
         F: FnMut(ID),
@@ -93,7 +101,7 @@ where
             });
     }
 
-    /// 扇形範囲内のエンティティを走査
+    /// Iterate entities within a sector (cone) defined by a center, radius, and angle range.
     pub fn sector<F>(
         &self,
         center: (i32, i32),
@@ -134,14 +142,14 @@ mod tests {
         hash.insert(e2, (11, 11), 0, 1);
         hash.insert(e3, (12, 12), 0, 2);
 
-        // 1. 種別フィルタ (Kind 1 のみ)
+        // 1. Kind filter (Kind 1 only)
         let mut found = Vec::new();
         hash.query()
             .with_kind(1)
             .circle((10, 10), 5.0, |id| found.push(id));
         assert_eq!(found, vec![e2]);
 
-        // 2. 複数種別フィルタ (Kind 0 or 2)
+        // 2. Multi-kind filter (Kind 0 or 2)
         let mut found = Vec::new();
         hash.query()
             .with_kind_mask((1 << 0) | (1 << 2))
@@ -150,7 +158,7 @@ mod tests {
         assert!(found.contains(&e3));
         assert!(!found.contains(&e2));
 
-        // 3. 除外 (e1 を除外)
+        // 3. Exclusion (exclude e1)
         let mut found = Vec::new();
         hash.query()
             .exclude(e1)
@@ -166,17 +174,17 @@ mod tests {
         let e1 = 1u32;
         hash.insert(e1, (10, 10), 0, 0);
 
-        // Rect クエリ
+        // Rect query
         let mut found = Vec::new();
         hash.query().rect(9, 9, 3, 3, |id| found.push(id));
         assert!(found.contains(&e1));
 
-        // 範囲外の Rect
+        // Rect outside range
         let mut found = Vec::new();
         hash.query().rect(20, 20, 5, 5, |id| found.push(id));
         assert!(found.is_empty());
 
-        // Mask クエリ
+        // Mask query
         let mut mask = BitBoard::<256, 256, RowMajorLayout>::default();
         mask.set(10, 10, true);
         let mut found = Vec::new();

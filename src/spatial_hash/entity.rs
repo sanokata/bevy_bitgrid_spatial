@@ -2,13 +2,18 @@ use super::SpatialHash;
 use core::hash::Hash;
 use bitgrid::{BitBoard, BitLayout};
 
+/// Per-entity spatial registration record stored in [`SpatialHash::entity_info`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct EntityEntry {
+    /// Tile-space center of the entity's occupied region.
     pub(crate) center: (i32, i32),
+    /// Half-size of the occupied square: covers `[center - radius, center + radius]` on each axis.
     pub(crate) radius: i32,
+    /// Index into `kind_boards`; identifies what kind of entity this is.
     pub(crate) kind_idx: usize,
 }
 
+/// Axis-aligned bounding rectangle in tile coordinates (inclusive on all sides).
 #[derive(Debug, Clone, Copy)]
 struct Rect {
     x1: i32,
@@ -18,6 +23,7 @@ struct Rect {
 }
 
 impl Rect {
+    /// Constructs the square `[center - radius, center + radius]` on each axis.
     fn centered(center: (i32, i32), radius: i32) -> Self {
         Self {
             x1: center.0 - radius,
@@ -28,32 +34,33 @@ impl Rect {
     }
 }
 
-/// `src` から `other` を引いた矩形差分（src ∖ other）を、最大 4 帯のみで走査して
-/// callback を呼び出す。各セルは 1 度だけ訪問される。
+/// Visits every tile in `src ∖ other` (set difference) exactly once,
+/// decomposing the difference into at most four axis-aligned bands.
 ///
-/// # 4 帯への分解
+/// # Band decomposition
 ///
-/// 2 つの軸並行矩形 `src` と `other` の差集合は、`src` を以下の 4 つの帯に分割すれば
-/// 重複なく列挙できる（`I` は src ∩ other の交差矩形）:
+/// The difference of two axis-aligned rectangles `src` and `other` is covered
+/// without overlap by splitting `src` around the intersection `I = src ∩ other`:
 ///
 /// ```text
 ///         src.x1                   src.x2
 ///   ┌──────┬───────────────────┬────────┐ src.y1
 ///   │      │                   │        │
-///   │      │      上 帯        │        │  ← y in [src.y1, iy1)
+///   │      │     top band      │        │  ← y in [src.y1, iy1)
 ///   │      ├───────────────────┤        │ iy1
 ///   │      │                   │        │
-///   │ 左帯 │   I (交差・除外)  │ 右帯   │  ← y in [iy1, iy2]
-///   │      │                   │        │
+///   │ left │   I (excluded)    │ right  │  ← y in [iy1, iy2]
+///   │ band │                   │  band  │
 ///   │      ├───────────────────┤        │ iy2
 ///   │      │                   │        │
-///   │      │      下 帯        │        │  ← y in (iy2, src.y2]
+///   │      │    bottom band    │        │  ← y in (iy2, src.y2]
 ///   └──────┴───────────────────┴────────┘ src.y2
 ///        ix1                   ix2
 /// ```
 ///
-/// 上帯と下帯は src の全幅を走査し、左帯と右帯は交差行 `[iy1, iy2]` のみを走査する。
-/// 交差が無い（`ix1 > ix2 || iy1 > iy2`）場合は src 全体が差分となる。
+/// Top and bottom bands span the full width of `src`; left and right bands cover
+/// only the intersection rows `[iy1, iy2]`. When there is no intersection
+/// (`ix1 > ix2 || iy1 > iy2`), all of `src` is returned as a single region.
 fn for_each_rect_diff<F: FnMut(i32, i32)>(src: Rect, other: Rect, mut f: F) {
     let ix1 = src.x1.max(other.x1);
     let ix2 = src.x2.min(other.x2);
@@ -61,7 +68,7 @@ fn for_each_rect_diff<F: FnMut(i32, i32)>(src: Rect, other: Rect, mut f: F) {
     let iy2 = src.y2.min(other.y2);
 
     if ix1 > ix2 || iy1 > iy2 {
-        // 交差なし: src 全体が差分
+        // No overlap: the entire src is the difference.
         for y in src.y1..=src.y2 {
             for x in src.x1..=src.x2 {
                 f(x, y);
@@ -70,7 +77,7 @@ fn for_each_rect_diff<F: FnMut(i32, i32)>(src: Rect, other: Rect, mut f: F) {
         return;
     }
 
-    // 上帯
+    // Top band: full width, rows above the intersection.
     if src.y1 < iy1 {
         for y in src.y1..iy1 {
             for x in src.x1..=src.x2 {
@@ -78,7 +85,7 @@ fn for_each_rect_diff<F: FnMut(i32, i32)>(src: Rect, other: Rect, mut f: F) {
             }
         }
     }
-    // 下帯
+    // Bottom band: full width, rows below the intersection.
     if iy2 < src.y2 {
         for y in (iy2 + 1)..=src.y2 {
             for x in src.x1..=src.x2 {
@@ -86,7 +93,7 @@ fn for_each_rect_diff<F: FnMut(i32, i32)>(src: Rect, other: Rect, mut f: F) {
             }
         }
     }
-    // 左帯
+    // Left band: columns left of the intersection, intersection rows only.
     if src.x1 < ix1 {
         for y in iy1..=iy2 {
             for x in src.x1..ix1 {
@@ -94,7 +101,7 @@ fn for_each_rect_diff<F: FnMut(i32, i32)>(src: Rect, other: Rect, mut f: F) {
             }
         }
     }
-    // 右帯
+    // Right band: columns right of the intersection, intersection rows only.
     if ix2 < src.x2 {
         for y in iy1..=iy2 {
             for x in (ix2 + 1)..=src.x2 {
@@ -109,24 +116,24 @@ impl<ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitL
 where
     ID: Copy + Eq + Hash,
 {
-    /// 指定したエンティティの現在の位置情報を取得
+    /// Returns the tile-space `(x, y, radius)` of the entity, or `None` if not registered.
     pub fn get_entity_info(&self, id: ID) -> Option<(i32, i32, i32)> {
         self.entity_info
             .get(&id)
             .map(|info| (info.center.0, info.center.1, info.radius))
     }
 
-    /// エンティティの各セルへの登録内容を差分更新する。
+    /// Updates the entity's cell registrations using a minimal diff.
     ///
-    /// 入力に応じて以下の 3 経路のいずれかを通る:
-    /// 1. **未登録 ID**: そのまま `insert` を呼ぶ（新規挿入）
-    /// 2. **center / radius / kind_idx が完全一致**: 即 return（no-op）
-    /// 3. **radius または kind_idx が変化**: 既存登録を `remove` して新規 `insert`
-    /// 4. **center のみ変化**: `for_each_rect_diff` で旧範囲∖新範囲 と 新範囲∖旧範囲 を
-    ///    最小帯のみ走査し、cell_remove / cell_insert を発行
+    /// Takes one of four paths depending on what changed:
     ///
-    /// 経路 4 が最も効率的で、典型的な「半径そのまま、向きそのまま、位置だけ動く」
-    /// アクター移動ではここを通る。
+    /// 1. **Not registered** — delegates to [`insert`](Self::insert).
+    /// 2. **Exact match** (center, radius, and kind_idx all unchanged) — no-op.
+    /// 3. **radius or kind_idx changed** — calls [`remove`](Self::remove) then
+    ///    [`insert`](Self::insert) to fully rebuild the registration.
+    /// 4. **center only changed** — uses [`for_each_rect_diff`] to visit only the
+    ///    cells that entered or left the bounding square, issuing targeted
+    ///    `cell_remove`/`cell_insert` calls.
     pub fn update_diff(
         &mut self,
         id: ID,
@@ -135,14 +142,14 @@ where
         new_kind_idx: usize,
     ) {
         let old_info = if let Some(info) = self.entity_info.get(&id) {
-            // 経路 2: 完全一致 → 早期 return
+            // Path 2: exact match — nothing to do.
             if info.center == new_center
                 && info.radius == new_radius
                 && info.kind_idx == new_kind_idx
             {
                 return;
             }
-            // 経路 3: radius / kind_idx 変化 → remove + insert で安全に再構築
+            // Path 3: radius or kind changed — rebuild via remove + insert.
             if info.radius != new_radius || info.kind_idx != new_kind_idx {
                 self.remove(id);
                 self.insert(id, new_center, new_radius, new_kind_idx);
@@ -150,12 +157,12 @@ where
             }
             *info
         } else {
-            // 経路 1: 未登録 → 新規挿入
+            // Path 1: not yet registered — insert fresh.
             self.insert(id, new_center, new_radius, new_kind_idx);
             return;
         };
 
-        // 経路 4: center のみ変化 → 4 帯差分で最小走査
+        // Path 4: center only changed — scan the minimal band diff.
 
         let old_center = old_info.center;
         let radius = new_radius;
@@ -164,12 +171,12 @@ where
         let old_rect = Rect::centered(old_center, radius);
         let new_rect = Rect::centered(new_center, radius);
 
-        // 旧範囲にあって新範囲にないセルを削除（矩形差分の 4 帯のみ走査）
+        // Remove cells that were in the old region but are not in the new one.
         for_each_rect_diff(old_rect, new_rect, |x, y| {
             self.cell_remove(x, y, id, kind_idx);
         });
 
-        // 新範囲にあって旧範囲にないセルを挿入
+        // Insert cells that are in the new region but were not in the old one.
         for_each_rect_diff(new_rect, old_rect, |x, y| {
             self.cell_insert(x, y, id, kind_idx);
         });
@@ -179,12 +186,11 @@ where
         }
     }
 
-    /// しきい値ベースのスロットリング更新。
+    /// Throttled update that suppresses [`update_diff`](Self::update_diff) for small movements.
     ///
-    /// 移動量が小さい場合に SpatialHash の差分更新を抑制する。判定は
-    /// **Chebyshev 距離（軸別の最大ずれ）** を使い、`|dx| < threshold && |dy| < threshold`
-    /// かつ radius / kind_idx に変化がなければ何もしない。境界判定は厳密な不等号で、
-    /// `threshold = 1` なら 1 タイル以上動くまで update_diff が走らない。
+    /// Suppression criterion: strict Chebyshev distance `|dx| < threshold && |dy| < threshold`
+    /// **and** no change to `radius` or `kind_idx`. With `threshold = 1`, the entity must
+    /// move at least one full tile on either axis before the hash is updated.
     pub fn update_with_threshold(
         &mut self,
         id: ID,
@@ -209,6 +215,8 @@ where
         self.update_diff(id, new_center, new_radius, new_kind_idx);
     }
 
+    /// Registers `id` at tile `(x, y)` in the presence and kind bitmaps.
+    /// Out-of-bounds tiles are silently ignored by `tile_to_index`.
     pub(super) fn cell_insert(&mut self, x: i32, y: i32, id: ID, kind_idx: usize) {
         if let Some(idx) = BitBoard::<W, H, L>::tile_to_index(x, y) {
             self.cells[idx].push((id, kind_idx as u8));
@@ -217,6 +225,7 @@ where
         }
     }
 
+    /// Removes `id` from tile `(x, y)` and clears presence/kind bits if the cell is now empty.
     pub(super) fn cell_remove(&mut self, x: i32, y: i32, id: ID, kind_idx: usize) {
         if let Some(idx) = BitBoard::<W, H, L>::tile_to_index(x, y) {
             let list = &mut self.cells[idx];
@@ -234,6 +243,11 @@ where
         }
     }
 
+    /// Inserts an entity at the given tile position with the specified radius and kind.
+    ///
+    /// Registers the entity in every tile within `[tile_pos ± radius]` on both axes.
+    /// Calling `insert` on an already-registered ID overwrites `entity_info` but leaves
+    /// stale cell entries; call [`remove`](Self::remove) first when re-registering.
     pub fn insert(&mut self, id: ID, tile_pos: (i32, i32), radius: i32, kind_idx: usize) {
         let mask = BitBoard::<W, H, L>::mask_rect(
             tile_pos.0 - radius,
@@ -261,6 +275,9 @@ where
         );
     }
 
+    /// Removes an entity from all cells it currently occupies.
+    ///
+    /// If the entity is not registered, this is a no-op.
     pub fn remove(&mut self, id: ID) {
         if let Some(entry) = self.entity_info.remove(&id) {
             let radius = entry.radius;
@@ -273,6 +290,7 @@ where
         }
     }
 
+    /// Alias for [`update_diff`](Self::update_diff).
     pub fn update(&mut self, id: ID, new_tile_pos: (i32, i32), radius: i32, kind_idx: usize) {
         self.update_diff(id, new_tile_pos, radius, kind_idx);
     }

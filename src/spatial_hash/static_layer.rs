@@ -2,9 +2,9 @@ use super::SpatialHash;
 use core::hash::Hash;
 use bitgrid::{BitBoard, BitLayout};
 
-/// `is_static_area_all_set` が事前計算済みの収縮レイヤーを使う半径。
-/// この配列の要素 `r` が `eroded_layers[layer][r-1]` に対応する。
-/// （半径 0 は元のレイヤーを直接参照するためテーブルには含めない）
+/// Radii for which `is_static_area_all_set` uses a pre-eroded layer cache.
+/// Element `r` corresponds to `eroded_layers[layer][r - 1]`.
+/// Radius 0 is handled separately via a direct layer lookup and is not in this table.
 const CACHED_EROSION_RADII: [i32; 2] = [1, 2];
 
 impl<ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitLayout<W, H>>
@@ -12,12 +12,14 @@ impl<ID, const W: usize, const H: usize, const E: usize, const S: usize, L: BitL
 where
     ID: Copy + Eq + Hash,
 {
-    /// 指定インデックスの静的レイヤーを取得
+    /// Returns the static layer at the given index.
     #[inline(always)]
     pub fn static_layer(&self, layer_idx: usize) -> &BitBoard<W, H, L> {
         &self.static_layers[layer_idx]
     }
 
+    /// Computes a visibility mask from `(cx, cy)` within `radius`, treating the
+    /// specified static layer as the set of opaque tiles.
     pub fn mask_visibility(
         &self,
         cx: i32,
@@ -29,7 +31,7 @@ where
         BitBoard::<W, H, L>::mask_visibility(cx, cy, radius, opaque_board)
     }
 
-    /// 既存のバッファを使用して視界マスクを計算（アロケーションフリー）
+    /// Computes a visibility mask into an existing buffer (allocation-free).
     pub fn mask_visibility_into(
         &self,
         cx: i32,
@@ -42,16 +44,16 @@ where
         out.mask_visibility_into(cx, cy, radius, opaque_board);
     }
 
-    /// 静的レイヤー全体を一括更新し、リビジョンを上げる。
+    /// Replaces an entire static layer and rebuilds its erosion caches.
     ///
-    /// `revision` は呼び出し側（典型的には `TileMap::revision`）から伝搬される
-    /// 単調増加のソース ID で、`static_revision()` と比較することで「再同期が必要か」を
-    /// 判定するための変更検知トークン。値そのものに意味はなく、`!=` 比較のみが使われる。
+    /// `revision` is a monotonically increasing token propagated from the authoritative
+    /// tile-map (e.g. `TileMap::revision`). It is stored as-is and compared with `!=`
+    /// by callers to detect whether a re-sync is needed; its absolute value has no meaning.
     ///
-    /// **注意**: この関数は `static_layers` と `eroded_layers` の両方を一括で再計算する。
-    /// 個別タイル更新を行う `update_static_tile` は `eroded_layers` を更新しないため、
-    /// 部分更新後に半径 1〜2 の `is_static_area_all_set` を呼ぶと古いキャッシュ結果を返す。
-    /// 一括変更後は本関数を呼んでキャッシュを再構築すること。
+    /// **Note**: this function rebuilds both `static_layers` and `eroded_layers` atomically.
+    /// [`update_static_tile`](Self::update_static_tile) only updates `static_layers` and
+    /// leaves `eroded_layers` stale, so callers that rely on cached radius-1/2 queries
+    /// must call this function after a batch of tile updates.
     pub fn full_sync_static_layer(
         &mut self,
         layer_idx: usize,
@@ -62,10 +64,10 @@ where
             return;
         }
 
-        // 既存バッファを流用してコピー（再アロケートなし）
+        // Copy into the existing buffer (no reallocation).
         self.static_layers[layer_idx].clone_from(board);
 
-        // 収縮済みキャッシュ (radius=1, radius=2) も同じ buffer を再利用して in-place 更新
+        // Rebuild erosion caches (radius=1, radius=2) in-place, reusing a scratch buffer.
         let mut scratch = BitBoard::<W, H, L>::new();
         self.eroded_layers[layer_idx][0].clone_from(board);
         self.eroded_layers[layer_idx][0].erode_with_buffer(1, &mut scratch);
@@ -75,7 +77,11 @@ where
         self.static_revision = revision;
     }
 
-    /// 特定のタイルの静的レイヤー情報を更新
+    /// Updates a single tile in a static layer and advances the revision token.
+    ///
+    /// **Note**: this does not update `eroded_layers`. After calling this, cached
+    /// radius-1/2 results from [`is_static_area_all_set`](Self::is_static_area_all_set)
+    /// will be stale until [`full_sync_static_layer`](Self::full_sync_static_layer) is called.
     pub fn update_static_tile(
         &mut self,
         layer_idx: usize,
@@ -90,15 +96,18 @@ where
         }
     }
 
+    /// Returns the current static-layer revision token.
     pub fn static_revision(&self) -> u32 {
         self.static_revision
     }
 
-    /// 指定した静的レイヤー (地形等) の範囲内がすべてセットされているか判定 (通行判定用)。
+    /// Returns `true` if every tile in the square `[x ± radius, y ± radius]` is set
+    /// in the given static layer (e.g. passability check).
     ///
-    /// 半径 0 は元のレイヤーへの直接参照、`CACHED_EROSION_RADII` に含まれる半径
-    /// （現在は 1, 2）は事前計算済み収縮レイヤーで O(1) 判定する。
-    /// それ以外は BitBoard 側の汎用 `is_area_all_set` にフォールバックする。
+    /// - `radius == 0`: direct single-tile lookup.
+    /// - Radii in `CACHED_EROSION_RADII` (currently 1 and 2): O(1) lookup via the
+    ///   pre-eroded cache built by [`full_sync_static_layer`](Self::full_sync_static_layer).
+    /// - Any other radius: falls back to the generic `BitBoard::is_area_all_set`.
     pub fn is_static_area_all_set(&self, layer_idx: usize, x: i32, y: i32, radius: i32) -> bool {
         if layer_idx >= S {
             return false;
@@ -106,14 +115,14 @@ where
         if radius == 0 {
             return self.static_layers[layer_idx].get(x, y);
         }
-        // CACHED_EROSION_RADII の要素 r に対応する eroded_layers[layer_idx][r - 1] を引く
         if let Some(cache_idx) = CACHED_EROSION_RADII.iter().position(|&r| r == radius) {
             return self.eroded_layers[layer_idx][cache_idx].get(x, y);
         }
         self.static_layers[layer_idx].is_area_all_set(x, y, radius)
     }
 
-    /// 指定した静的レイヤー (地形等) の範囲内に一つでもセットされたビットがあるか判定 (衝突判定用)
+    /// Returns `true` if at least one tile in the square `[x ± radius, y ± radius]` is
+    /// set in the given static layer (e.g. collision check).
     pub fn is_static_area_any_set(&self, layer_idx: usize, x: i32, y: i32, radius: i32) -> bool {
         if layer_idx >= S {
             return false;
