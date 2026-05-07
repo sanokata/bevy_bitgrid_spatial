@@ -2,6 +2,9 @@
 name = "bevy_bitgrid_spatial"
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A spatial hash for Bevy using bitgrid for efficient spatial indexing."
+repository = "https://github.com/sanokata/bevy_bitgrid_spatial"
 
 [dependencies]
 bitgrid = { git = "https://github.com/sanokata/bitgrid.rs", branch = "master" }
