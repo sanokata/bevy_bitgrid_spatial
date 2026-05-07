@@ -88,7 +88,7 @@ fn spatial_hash_sync_system<ID, const W: usize, const H: usize, const E: usize, 
     // Sync entities whose Transform or SpatialManaged changed this frame.
     for (entity, transform, managed) in query.iter() {
         let pos = transform.translation.truncate();
-        let tile_pos = L::world_to_tile((pos.x, pos.y));
+        let tile_pos = L::point_to_coord((pos.x, pos.y));
 
         // Skip updates smaller than 1 tile (Chebyshev distance).
         spatial_hash.update_with_threshold(
