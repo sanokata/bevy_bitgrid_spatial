@@ -62,6 +62,10 @@ where
     }
 }
 
+/// Filter for the spatial hash synchronization system.
+#[cfg(feature = "bevy")]
+type SpatialSyncFilter = Or<(Changed<Transform>, Changed<SpatialManaged>)>;
+
 /// `PostUpdate` system that keeps the spatial hash in sync with the ECS world.
 ///
 /// - Removes entities that lost their [`SpatialManaged`] component (despawned or
@@ -71,10 +75,7 @@ where
 #[cfg(feature = "bevy")]
 fn spatial_hash_sync_system<ID, const W: usize, const H: usize, const E: usize, const S: usize, L>(
     mut spatial_hash: ResMut<SpatialHash<ID, W, H, E, S, L>>,
-    query: Query<
-        (Entity, &Transform, &SpatialManaged),
-        Or<(Changed<Transform>, Changed<SpatialManaged>)>,
-    >,
+    query: Query<(Entity, &Transform, &SpatialManaged), SpatialSyncFilter>,
     mut removed: RemovedComponents<SpatialManaged>,
 ) where
     ID: From<Entity> + Copy + Eq + Hash + Send + Sync + 'static,

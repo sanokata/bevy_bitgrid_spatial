@@ -1,6 +1,6 @@
 [package]
 name = "bevy_bitgrid_spatial"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "A spatial hash for Bevy using bitgrid for efficient spatial indexing."
