@@ -73,7 +73,15 @@ fn query_system(spatial_hash: Res<SpatialHash<Entity, 128, 128, 4, 1, StandardLa
 }
 ```
 
-## License
+## Benchmarks
+
+You can run benchmarks using `criterion`:
+
+```bash
+cargo bench
+```
+
+These benchmarks measure the performance of entity insertion, differential updates, and various spatial queries.
 
 Licensed under either of
 
