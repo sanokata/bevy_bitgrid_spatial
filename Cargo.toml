@@ -1,5 +1,5 @@
 [package]
-name = "lexaos_bitgrid_spatial"
+name = "bevy_bitgrid_spatial"
 version = "0.1.0"
 edition = "2024"
 
