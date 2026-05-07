@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-lexaos_bitboard = { path = "../lexaos_bitboard" }
+bitgrid = { git = "https://github.com/sanokata/bitgrid.rs", branch = "master" }
 hashbrown = "0.15"
 ahash = "0.8"
 smallvec = "1.13"
