@@ -1,6 +1,6 @@
 use super::spatial_hash::SpatialHash;
-use core::hash::Hash;
 use bitgrid::{BitBoard, BitLayout};
+use core::hash::Hash;
 
 /// Builder for flexible spatial hash queries.
 ///

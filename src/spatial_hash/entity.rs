@@ -1,6 +1,6 @@
 use super::SpatialHash;
-use core::hash::Hash;
 use bitgrid::{BitBoard, BitLayout};
+use core::hash::Hash;
 
 /// Per-entity spatial registration record stored in [`SpatialHash::entity_info`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

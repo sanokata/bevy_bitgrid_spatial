@@ -1,6 +1,6 @@
 use super::SpatialHash;
-use core::hash::Hash;
 use bitgrid::{BitBoard, BitLayout};
+use core::hash::Hash;
 
 /// Radii for which `is_static_area_all_set` uses a pre-eroded layer cache.
 /// Element `r` corresponds to `eroded_layers[layer][r - 1]`.

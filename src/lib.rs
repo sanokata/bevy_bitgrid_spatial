@@ -71,7 +71,10 @@ where
 #[cfg(feature = "bevy")]
 fn spatial_hash_sync_system<ID, const W: usize, const H: usize, const E: usize, const S: usize, L>(
     mut spatial_hash: ResMut<SpatialHash<ID, W, H, E, S, L>>,
-    query: Query<(Entity, &Transform, &SpatialManaged), Or<(Changed<Transform>, Changed<SpatialManaged>)>>,
+    query: Query<
+        (Entity, &Transform, &SpatialManaged),
+        Or<(Changed<Transform>, Changed<SpatialManaged>)>,
+    >,
     mut removed: RemovedComponents<SpatialManaged>,
 ) where
     ID: From<Entity> + Copy + Eq + Hash + Send + Sync + 'static,

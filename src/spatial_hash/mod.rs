@@ -1,7 +1,7 @@
 use ahash::RandomState;
+use bitgrid::{BitBoard, BitLayout, RowMajorLayout};
 use core::hash::Hash;
 use hashbrown::HashMap;
-use bitgrid::{BitBoard, BitLayout, RowMajorLayout};
 use smallvec::SmallVec;
 use std::marker::PhantomData;
 
@@ -179,7 +179,7 @@ mod tests {
 
         // e1 directly right (0°), e2 directly left (180°) from (10, 10).
         hash.insert(e1, (15, 10), 0, 0); // right (0°)
-        hash.insert(e2, (5, 10), 0, 0);  // left (180°)
+        hash.insert(e2, (5, 10), 0, 0); // left (180°)
 
         let mut found = Vec::new();
         // 90° forward cone facing right (-45° to +45°).

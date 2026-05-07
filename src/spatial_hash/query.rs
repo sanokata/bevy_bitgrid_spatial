@@ -1,6 +1,6 @@
-use core::hash::Hash;
-use bitgrid::{BitBoard, BitLayout};
 use super::SpatialHash;
+use bitgrid::{BitBoard, BitLayout};
+use core::hash::Hash;
 
 /// Start angle and sweep angle for a sector query.
 #[derive(Debug, Clone, Copy)]
@@ -84,8 +84,7 @@ where
     ) where
         F: FnMut(ID),
     {
-        let circle_mask =
-            BitBoard::<W, H, L>::mask_sector(center.0, center.1, radius, 0.0, 360.0);
+        let circle_mask = BitBoard::<W, H, L>::mask_sector(center.0, center.1, radius, 0.0, 360.0);
         self.query_with_mask(&circle_mask, kind_mask, exclude, callback);
     }
 
